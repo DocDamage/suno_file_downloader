@@ -46,31 +46,44 @@
 - **Chrome** 또는 **Edge** (이미 설치된 브라우저를 사용합니다)
 - Suno **Pro 또는 Premier** 구독 — WAV는 유료 플랜 전용입니다 (MP3는 무료도 가능)
 
-### 방법 A — exe 내려받기 (Python 불필요) ⭐
-
-[**Releases**](https://github.com/only2433/suno_file_downloader/releases) 에서
-`SunoDownloader-win64.zip` 을 받아 압축을 풀고 **`SunoDownloader.exe` 를 더블클릭**하세요.
-
-Python도 pip도 필요 없습니다. 실행에 필요한 모든 것이 안에 들어 있습니다.
-
-> `SunoDownloader.exe` 와 `_internal\` 폴더는 항상 같은 위치에 있어야 합니다.
-> 바탕화면에서 쓰려면 exe를 우클릭 → **바로 가기 만들기**.
-
-받은 파일은 **exe가 있는 폴더**의 `wav\`, `mp3\` 에 저장됩니다.
-
-### 방법 B — 소스로 실행
-
-코드를 고치거나 직접 빌드하고 싶을 때만 필요합니다.
+### 실행
 
 ```bash
 git clone https://github.com/only2433/suno_file_downloader.git
 cd suno_file_downloader
+```
+
+그리고 **`run.bat` 을 더블클릭**하세요. 끝입니다.
+
+처음 한 번은 필요한 패키지(playwright)를 자동으로 설치하고, 그 다음부터는 바로
+실행됩니다. Python이 없으면 어디서 받는지 알려 줍니다.
+
+명령을 붙여서 쓸 수도 있습니다.
+
+```bash
+run.bat sync
+run.bat makewav --dry-run
+```
+
+<details>
+<summary>배치 파일 없이 직접 실행하려면</summary>
+
+<br>
+
+```bash
 pip install -r requirements.txt
 python suno.py
 ```
 
-`pip install` 은 브라우저 자동화에 쓰는 **playwright** 를 설치합니다.
+`pip install` 이 설치하는 것은 브라우저 자동화에 쓰는 **playwright** 하나입니다.
 (별도 브라우저를 내려받지 않고 이미 설치된 Chrome/Edge를 사용합니다.)
+</details>
+
+### exe로 만들기 (선택)
+
+Python 없이 더블클릭만으로 쓰고 싶다면 `build.bat` 을 실행하세요.
+`SunoDownloader.exe` 와 `_internal\` 폴더가 만들어지고, 이 둘을 복사해 두면
+Python이 없는 PC에서도 돌아갑니다. (항상 같은 위치에 두어야 합니다.)
 
 ### 처음 실행하면
 
@@ -177,6 +190,7 @@ suno_file_downloader/
 ├─ suno.py                 메인 (로그인 · 동기화 · 웹서버 · CLI)
 ├─ download.py             다운로드 엔진 (스트리밍 · 재시도 · 기록)
 ├─ ui.html                 웹 UI
+├─ run.bat                 실행 (패키지 자동 설치 후 시작)
 ├─ build.bat               exe 빌드
 ├─ collect.js / convert.js 예전 수동 방식 (콘솔 붙여넣기용)
 │
