@@ -1,0 +1,5 @@
+# 실행에 필요
+playwright>=1.40
+
+# exe 빌드에만 필요
+pyinstaller>=6.0

@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Suno 다운로더</title>
+<style>
+  :root{
+    --bg:#f7f7f9; --panel:#fff; --line:#e3e3e8; --text:#1a1a1f; --dim:#6a6a76;
+    --accent:#6c4cf1; --accent-weak:#efeaff; --ok:#178a4c; --fail:#c4321f; --skip:#8a8a94;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]){
+      --bg:#141419; --panel:#1c1c23; --line:#2e2e38; --text:#ececf1; --dim:#9a9aa8;
+      --accent:#9d86ff; --accent-weak:#2a2440; --ok:#4ec97f; --fail:#ff7a68; --skip:#7a7a88;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.5 -apple-system,"Segoe UI",Roboto,"Malgun Gothic",sans-serif}
+  header{position:sticky;top:0;z-index:5;background:var(--panel);
+         border-bottom:1px solid var(--line);padding:14px 18px}
+  h1{margin:0 0 10px;font-size:16px;font-weight:650}
+  .meta{color:var(--dim);font-size:12px;font-weight:400;margin-left:8px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  input[type=search]{flex:1;min-width:200px;padding:7px 11px;border:1px solid var(--line);
+    border-radius:7px;background:var(--bg);color:var(--text);font-size:14px}
+  select{padding:7px 9px;border:1px solid var(--line);border-radius:7px;
+    background:var(--panel);color:var(--text);font-size:13px;cursor:pointer}
+  button{padding:7px 13px;border:1px solid var(--line);border-radius:7px;
+    background:var(--panel);color:var(--text);cursor:pointer;font-size:13px}
+  button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.primary:hover:not(:disabled){filter:brightness(1.1);color:#fff}
+  label.chk{display:inline-flex;align-items:center;gap:5px;cursor:pointer;user-select:none}
+  .bar{margin-top:10px;padding:9px 12px;background:var(--accent-weak);border-radius:7px;
+       display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:13px}
+  main{padding:14px 18px 96px}   /* 하단 여백 = 고정 플레이어 바가 마지막 행을 가리지 않게 */
+  /* overflow:hidden 을 주면 스크롤 컨테이너가 생겨 th 의 position:sticky 가 깨진다 */
+  table{width:100%;border-collapse:collapse;background:var(--panel);
+        border:1px solid var(--line);border-radius:8px}
+  th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);font-size:13px}
+  tbody td{padding-top:9px;padding-bottom:9px}
+  td.art{width:64px;padding:6px 0 6px 10px}
+  td.art img{width:54px;height:54px;border-radius:6px;display:block;object-fit:cover;
+             background:var(--bg);border:1px solid var(--line)}
+  td.title{font-size:14px}
+  .sub{display:block;margin-top:2px;font-size:11px;color:var(--dim);font-weight:400;
+       white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px}
+  /* --hdr-h 는 실제 header 높이로 JS가 채운다 (진행률 바가 생기면 높이가 바뀌므로) */
+  th{background:var(--bg);position:sticky;top:var(--hdr-h,130px);z-index:2;
+     font-weight:600;font-size:12px;color:var(--dim)}
+  tr:last-child td{border-bottom:none}
+  tr.sel td{background:var(--accent-weak)}
+  td.num{color:var(--dim);font-variant-numeric:tabular-nums;width:52px}
+  /* 좁은 열은 줄바꿈되면 "받 음" 처럼 깨지므로 한 줄로 고정한다 */
+  th,td.num,td.have,td.none,.tag{white-space:nowrap}
+  td.title{font-weight:500}
+  .tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;
+       background:var(--bg);color:var(--dim);border:1px solid var(--line)}
+  .have{color:var(--ok);font-weight:600}
+  .none{color:var(--dim)}
+  #logwrap{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+           border-radius:8px;padding:12px;display:none}
+  #log{max-height:280px;overflow:auto;font-family:Consolas,monospace;font-size:12px;
+       white-space:pre-wrap;margin:0}
+  .pbar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;flex:1;min-width:120px}
+  .pbar>div{height:100%;background:var(--accent);width:0;transition:width .3s}
+  .empty{padding:40px;text-align:center;color:var(--dim)}
+
+  /* 미리듣기 */
+  button.play{width:26px;height:26px;padding:0;border-radius:50%;line-height:1;
+    font-size:11px;display:grid;place-items:center}
+  tr.playing td{background:var(--accent-weak)}
+  tr.playing td.title{color:var(--accent)}
+  #bar{position:fixed;left:0;right:0;bottom:0;z-index:20;display:none;
+    gap:12px;align-items:center;padding:10px 18px;
+    background:var(--panel);border-top:1px solid var(--line);
+    box-shadow:0 -3px 14px rgba(0,0,0,.13)}
+  #bar.on{display:flex}
+  #bArt{width:40px;height:40px;border-radius:6px;object-fit:cover;
+        background:var(--bg);border:1px solid var(--line)}
+  #bTitle{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:26%}
+  #seek{flex:1;min-width:120px;accent-color:var(--accent);cursor:pointer}
+  #bTime{color:var(--dim);font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap}
+  #bSrc{font-size:11px;color:var(--dim);border:1px solid var(--line);
+    border-radius:4px;padding:1px 6px;white-space:nowrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>Suno 다운로더 <span class="meta" id="meta"></span></h1>
+  <div class="row">
+    <input type="search" id="q" placeholder="제목 검색...">
+    <select id="sort" title="목록 정렬 기준">
+      <option value="newest">최신순 (Suno와 동일)</option>
+      <option value="oldest">오래된순</option>
+      <option value="index">파일번호순</option>
+      <option value="title">제목순</option>
+    </select>
+    <button id="selAll">검색결과 전체선택</button>
+    <button id="selNone">선택해제</button>
+    <button id="selNew">아직 안 받은 것만</button>
+  </div>
+  <div class="bar">
+    <strong id="count">0곡 선택</strong>
+    <label class="chk"><input type="checkbox" id="fWav" checked> WAV</label>
+    <label class="chk"><input type="checkbox" id="fMp3"> MP3</label>
+    <label class="chk" title="서버에 WAV가 아직 없으면 변환을 요청한 뒤 받습니다. Suno에서 다운로드 버튼을 누르는 것과 같은 동작이라, 2026-09-03 부터는 월 한도에 포함될 수 있습니다.">
+      <input type="checkbox" id="mkWav" checked> 없으면 WAV 생성</label>
+    <label class="chk"><input type="checkbox" id="hideUntitled" checked> untitled 숨기기</label>
+    <button class="primary" id="go">다운로드 시작</button>
+    <span id="status"></span>
+  </div>
+  <div class="bar" id="progress" style="display:none">
+    <div class="pbar"><div id="pfill"></div></div>
+    <span id="ptext"></span>
+  </div>
+</header>
+
+<main>
+  <table>
+    <thead><tr>
+      <th style="width:34px"><input type="checkbox" id="master"></th>
+      <th style="width:38px" title="미리듣기"></th>
+      <th style="width:64px"></th>
+      <th class="num" style="width:66px"
+          title="파일 이름 앞에 붙는 번호입니다. 곡마다 고정되며 목록 순서와는 무관합니다.">파일 #</th>
+      <th>제목</th><th style="width:110px">모델</th>
+      <th style="width:70px">길이</th>
+      <th style="width:66px" title="내 PC에 이미 받아둔 파일이 있는지 여부입니다.">WAV</th>
+      <th style="width:66px" title="내 PC에 이미 받아둔 파일이 있는지 여부입니다.">MP3</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div class="empty" id="empty" style="display:none">검색 결과가 없습니다.</div>
+  <div id="logwrap"><pre id="log"></pre></div>
+</main>
+
+<div id="bar">
+  <img id="bArt" alt="">
+  <button id="bPlay">⏸</button>
+  <span id="bTitle"></span>
+  <span id="bSrc"></span>
+  <input type="range" id="seek" min="0" max="1000" value="0" step="1">
+  <span id="bTime">0:00 / 0:00</span>
+  <button id="bClose" title="닫기">✕</button>
+</div>
+
+<script>
+let SONGS = [], HAVE = {wav:new Set(), mp3:new Set()}, SEL = new Set(), poll = null;
+const $ = (id) => document.getElementById(id);
+
+// 테이블 헤더가 상단 바 바로 아래에 붙도록 실제 높이를 추적한다
+(() => {
+  const hdr = document.querySelector('header');
+  const sync = () => document.documentElement.style
+    .setProperty('--hdr-h', hdr.offsetHeight + 'px');
+  new ResizeObserver(sync).observe(hdr);
+  addEventListener('resize', sync);
+  sync();
+})();
+
+const fmtDur = (s) => s ? Math.floor(s/60) + ':' + String(Math.round(s%60)).padStart(2,'0') : '';
+
+async function load(){
+  const r = await fetch('/api/songs');
+  const d = await r.json();
+  SONGS = d.songs || [];
+  SONGS.forEach((s, i) => { s._pos = i; });   // 받아온 순서 = Suno 최신순
+  HAVE.wav = new Set(d.downloaded.wav || []);
+  HAVE.mp3 = new Set(d.downloaded.mp3 || []);
+  $('meta').textContent =
+    `Liked ${SONGS.length}곡 · 받아둔 것 WAV ${HAVE.wav.size} / MP3 ${HAVE.mp3.size}` +
+    (d.synced_at ? ` · 동기화 ${d.synced_at.replace('T',' ')}` : '');
+  render();
+}
+
+function visible(){
+  const q = $('q').value.trim().toLowerCase();
+  const hide = $('hideUntitled').checked;
+  return SONGS.filter(s => {
+    if (hide && s.title.trim().toLowerCase() === 'untitled') return false;
+    return !q || s.title.toLowerCase().includes(q);
+  }).sort(SORTERS[$('sort').value] || SORTERS.newest);
+}
+
+/* Suno 피드는 최신순으로 내려오므로 배열 순서(_pos)가 곧 최신순이다.
+   파일번호(index)는 곡마다 고정이라 최신곡일수록 큰 값 — 두 기준은 서로 반대다. */
+const SORTERS = {
+  newest: (a, b) => a._pos - b._pos,
+  oldest: (a, b) => b._pos - a._pos,
+  index:  (a, b) => a.index - b.index,
+  title:  (a, b) => a.title.localeCompare(b.title, 'ko'),
+};
+
+function render(){
+  const rows = visible();
+  $('empty').style.display = rows.length ? 'none' : 'block';
+  $('tbody').innerHTML = rows.map(s => `
+    <tr class="${SEL.has(s.id)?'sel':''}${NOW === s.id ? ' playing':''}" data-id="${s.id}">
+      <td><input type="checkbox" ${SEL.has(s.id)?'checked':''}></td>
+      <td><button class="play" data-play="${s.id}"
+            title="미리듣기">${NOW === s.id && !audio.paused ? '⏸' : '▶'}</button></td>
+      <td class="art"><img loading="lazy" decoding="async" width="54" height="54"
+            src="${artUrl(s)}" alt="" onerror="this.style.visibility='hidden'"></td>
+      <td class="num">${s.index}</td>
+      <td class="title">${esc(s.title)}
+        ${s.tags ? `<span class="sub" title="${esc(s.tags)}">${esc(s.tags)}</span>` : ''}</td>
+      <td><span class="tag">${esc(s.model||'')}</span></td>
+      <td class="num">${fmtDur(s.duration)}</td>
+      <td class="${HAVE.wav.has(s.id)?'have':'none'}">${HAVE.wav.has(s.id)?'받음':'미보유'}</td>
+      <td class="${HAVE.mp3.has(s.id)?'have':'none'}">${HAVE.mp3.has(s.id)?'받음':'미보유'}</td>
+    </tr>`).join('');
+  $('count').textContent = SEL.size + '곡 선택';
+  $('master').checked = rows.length > 0 && rows.every(s => SEL.has(s.id));
+}
+const esc = (t) => t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// 커버 이미지. 목록에 image_url 이 있으면 그걸 쓰고, 없으면 곡 id 로 만든다.
+const artUrl = (s) => s.image_url || `https://cdn2.suno.ai/image_${s.id}.jpeg`;
+
+/* ---------------- 미리듣기 ---------------- */
+// 받아둔 MP3 가 있으면 서버가 로컬 파일을, 없으면 Suno CDN 으로 넘겨준다
+const audio = new Audio();
+audio.preload = 'metadata';
+let NOW = null;
+
+function play(id){
+  if (NOW === id){                       // 같은 곡이면 재생/일시정지 토글
+    audio.paused ? audio.play() : audio.pause();
+    return;
+  }
+  NOW = id;
+  const s = SONGS.find(x => x.id === id);
+  audio.src = '/api/audio?id=' + encodeURIComponent(id);
+  setStatus('');
+  audio.play().catch(err => {
+    // 곡을 빠르게 바꾸면 이전 play() 가 취소되는데, 이건 오류가 아니다
+    if (err.name !== 'AbortError') setStatus('재생할 수 없습니다: ' + err.message);
+  });
+  $('bTitle').textContent = s ? s.title : '';
+  $('bArt').src = s ? artUrl(s) : '';
+  $('bSrc').textContent = HAVE.mp3.has(id) ? '내 파일' : '스트리밍';
+  $('bar').classList.add('on');
+  render();
+}
+
+function stopPlay(){
+  audio.pause(); audio.removeAttribute('src'); audio.load();
+  NOW = null; $('bar').classList.remove('on'); render();
+}
+
+const mmss = (t) => (isFinite(t) && t >= 0)
+  ? Math.floor(t/60) + ':' + String(Math.floor(t%60)).padStart(2,'0') : '0:00';
+
+audio.addEventListener('timeupdate', () => {
+  if (audio.duration && !seeking)
+    $('seek').value = Math.round(audio.currentTime / audio.duration * 1000);
+  $('bTime').textContent = mmss(audio.currentTime) + ' / ' + mmss(audio.duration);
+});
+audio.addEventListener('play',  () => { $('bPlay').textContent = '⏸'; setStatus(''); render(); });
+audio.addEventListener('pause', () => { $('bPlay').textContent = '▶'; render(); });
+audio.addEventListener('ended', stopPlay);
+audio.addEventListener('error', () => {
+  if (audio.getAttribute('src') && audio.error) setStatus('이 곡은 재생할 수 없습니다.');
+});
+
+let seeking = false;
+$('seek').addEventListener('input',  () => { seeking = true; });
+$('seek').addEventListener('change', () => {
+  if (audio.duration) audio.currentTime = $('seek').value / 1000 * audio.duration;
+  seeking = false;
+});
+$('bPlay').onclick  = () => audio.paused ? audio.play() : audio.pause();
+$('bClose').onclick = stopPlay;
+addEventListener('keydown', e => {          // 스페이스바로 재생/일시정지
+  if (e.code === 'Space' && NOW && e.target.tagName !== 'INPUT' && e.target.tagName !== 'SELECT'){
+    e.preventDefault();
+    audio.paused ? audio.play() : audio.pause();
+  }
+});
+
+$('tbody').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-play]');
+  if (btn){ play(btn.dataset.play); return; }   // 재생 버튼은 선택 토글을 건너뛴다
+  const tr = e.target.closest('tr'); if (!tr) return;
+  const id = tr.dataset.id;
+  SEL.has(id) ? SEL.delete(id) : SEL.add(id);
+  render();
+});
+$('master').addEventListener('change', e => {
+  const rows = visible();
+  e.target.checked ? rows.forEach(s => SEL.add(s.id)) : rows.forEach(s => SEL.delete(s.id));
+  render();
+});
+$('selAll').onclick = () => { visible().forEach(s => SEL.add(s.id)); render(); };
+$('selNone').onclick = () => { SEL.clear(); render(); };
+$('selNew').onclick = () => {
+  SEL.clear();
+  const w = $('fWav').checked, m = $('fMp3').checked;
+  visible().forEach(s => {
+    if ((w && !HAVE.wav.has(s.id)) || (m && !HAVE.mp3.has(s.id))) SEL.add(s.id);
+  });
+  render();
+};
+$('q').oninput = render;
+$('sort').onchange = render;
+$('hideUntitled').onchange = render;
+
+$('go').onclick = async () => {
+  const formats = [];
+  if ($('fWav').checked) formats.push('wav');
+  if ($('fMp3').checked) formats.push('mp3');
+  if (!SEL.size)   return setStatus('곡을 선택하세요.');
+  if (!formats.length) return setStatus('포맷을 선택하세요.');
+
+  $('go').disabled = true;
+  setStatus('시작하는 중...');
+  const r = await fetch('/api/download', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids: [...SEL], formats, makewav: $('mkWav').checked}),
+  });
+  const d = await r.json();
+  if (d.error) { setStatus(d.error); $('go').disabled = false; return; }
+  setStatus('');
+  $('logwrap').style.display = 'block';
+  $('progress').style.display = 'flex';
+  if (!poll) poll = setInterval(tick, 700);
+};
+const setStatus = (t) => { $('status').textContent = t; };
+
+async function tick(){
+  const d = await (await fetch('/api/progress')).json();
+  const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
+  $('pfill').style.width = pct + '%';
+  $('ptext').textContent =
+    `${d.done}/${d.total} (${pct}%) · 받음 ${d.ok} · 건너뜀 ${d.skip} · 실패 ${d.fail}` +
+    (d.current ? `  —  ${d.current}` : '');
+  const log = $('log');
+  const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  log.textContent = (d.log || []).join('\n');
+  if (stick) log.scrollTop = log.scrollHeight;
+
+  if (!d.running && d.finished){
+    clearInterval(poll); poll = null;
+    $('go').disabled = false;
+    await load();           // 받은 것 표시 갱신
+  }
+}
+load();
+</script>
+</body>
+</html>
