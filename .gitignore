@@ -35,3 +35,6 @@ __pycache__/
 .idea/
 Thumbs.db
 desktop.ini
+
+# 배포용 zip (Releases 에 올림)
+SunoDownloader-win64.zip
