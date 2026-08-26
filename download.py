@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import sys
 import threading
 import time
@@ -84,9 +85,33 @@ def safe_name(title: str, index: int, ext: str) -> str:
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
+def _make_ssl_context() -> ssl.SSLContext:
+    """CDN 접속용 TLS 설정.
+
+    Python 3.13 부터 create_default_context() 가 RFC 5280 엄격 검증
+    (VERIFY_X509_STRICT) 을 기본으로 켠다. 그런데 사내망·학내망·일부 백신이
+    쓰는 SSL 검사 장비는 인증서를 즉석에서 다시 발급하면서 Authority Key
+    Identifier 확장을 넣지 않는 경우가 많다. 그러면 브라우저는 멀쩡히 되는데
+    Python 만
+
+        [SSL: CERTIFICATE_VERIFY_FAILED] Missing Authority Key Identifier
+
+    로 전부 실패한다.
+
+    인증서 검증(체인 + 호스트명)은 그대로 두고, 새로 추가된 이 엄격 검사만
+    끈다. Python 3.12 까지와 같은 수준이다.
+    """
+    ctx = ssl.create_default_context()
+    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return ctx
+
+
+_SSL = _make_ssl_context()
+
+
 def open_url(url: str, method: str = "GET"):
     req = urllib.request.Request(url, headers={"User-Agent": UA}, method=method)
-    return urllib.request.urlopen(req, timeout=TIMEOUT)
+    return urllib.request.urlopen(req, timeout=TIMEOUT, context=_SSL)
 
 
 def remote_size(url: str) -> int | None:
