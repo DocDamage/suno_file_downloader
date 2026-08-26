@@ -17,9 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import socket
+import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -73,6 +77,8 @@ BROWSERS = {"chrome": "Chrome", "msedge": "Edge"}
 UI_FILE = ASSETS / "ui.html"
 # 인증(Clerk)만 있으면 되므로 라이브러리 페이지 대신 가벼운 최상위 페이지를 연다
 SUNO_URL = "https://suno.com/"
+# cmd_sync 가 "로그인이 안 돼 있다" 를 알리는 종료 코드 (다른 실패와 구분)
+NEED_LOGIN = 2
 
 # --------------------------------------------------------------------------- #
 # 브라우저에서 실행할 목록 수집 스크립트 (collect.js 와 같은 로직)
@@ -179,6 +185,135 @@ def _profile_dir(channel: str) -> Path:
     return HERE / (".chrome-profile" if channel == "chrome" else f".{channel}-profile")
 
 
+# 직접 띄운 브라우저를 (프로세스, Playwright Browser) 로 기억해 둔다.
+# 종료할 때 Browser.close() 로 정상 종료시켜야 쿠키·세션이 디스크에 남는다.
+_SPAWNED: list[tuple[subprocess.Popen, object]] = []
+
+# Playwright 가 브라우저에 붙는 기본 방식(--remote-debugging-pipe)이 통하지 않는
+# PC 가 있다. 그럴 때는 우리가 직접 --remote-debugging-port 로 띄우고 붙는다.
+_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--no-service-autorun",
+    "--disable-sync",
+    "--disable-features=Translate,OptimizationHints",
+]
+
+
+def _browser_exe(channel: str) -> str | None:
+    """설치된 Chrome / Edge 의 실행 파일 경로."""
+    exe = "chrome.exe" if channel == "chrome" else "msedge.exe"
+
+    if os.name == "nt":  # 레지스트리의 App Paths 가 가장 정확하다
+        try:
+            import winreg
+
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    key = winreg.OpenKey(
+                        root,
+                        rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}",
+                    )
+                    with key:
+                        path = winreg.QueryValue(key, None)
+                    if path and Path(path).exists():
+                        return path
+                except OSError:
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+
+    sub = ("Google/Chrome/Application" if channel == "chrome"
+           else "Microsoft/Edge/Application")
+    for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"),
+                 os.environ.get("LOCALAPPDATA")):
+        if base:
+            cand = Path(base) / sub / exe
+            if cand.exists():
+                return str(cand)
+
+    return shutil.which(exe)
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _wait_cdp(port: int, proc: subprocess.Popen, timeout: float = 40.0) -> bool:
+    """브라우저의 디버깅 포트가 열릴 때까지 기다린다."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/json/version", timeout=1
+            ):
+                return True
+        except Exception:  # noqa: BLE001
+            time.sleep(0.3)
+    return False
+
+
+def _browser_via_cdp(pw, headless: bool, channel: str):
+    """브라우저를 직접 띄운 뒤 CDP 로 붙는다. 실패하면 None."""
+    exe = _browser_exe(channel)
+    if not exe:
+        return None
+
+    port = _free_port()
+    profile = _profile_dir(channel)
+    profile.mkdir(parents=True, exist_ok=True)
+    args = [
+        exe,
+        f"--user-data-dir={profile}",
+        f"--remote-debugging-port={port}",
+        *_LAUNCH_ARGS,
+    ]
+    if headless:
+        args.append("--headless=new")
+    else:
+        args.append("--window-size=1280,900")
+    args.append("about:blank")
+
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not _wait_cdp(port, proc):
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    try:
+        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    _SPAWNED.append((proc, browser))
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    try:
+        page.set_viewport_size({"width": 1280, "height": 900})
+    except Exception:  # noqa: BLE001
+        pass
+    return ctx, page
+
+
 def _browser(headless: bool, channel: str = "chrome"):
     try:
         from playwright.sync_api import sync_playwright
@@ -186,6 +321,8 @@ def _browser(headless: bool, channel: str = "chrome"):
         sys.exit("playwright 가 없습니다.  pip install playwright  로 설치하세요.")
 
     pw = sync_playwright().start()
+
+    # 1순위: Playwright 가 알아서 띄우는 방식
     try:
         ctx = pw.chromium.launch_persistent_context(
             user_data_dir=str(_profile_dir(channel)),
@@ -194,11 +331,56 @@ def _browser(headless: bool, channel: str = "chrome"):
             viewport={"width": 1280, "height": 900},
             args=["--disable-blink-features=AutomationControlled"],
         )
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        return pw, ctx, page
     except Exception as e:  # noqa: BLE001
+        first_error = e
+
+    # 2순위: 직접 띄우고 CDP 로 붙기
+    got = _browser_via_cdp(pw, headless, channel)
+    if got is not None:
+        ctx, page = got
+        return pw, ctx, page
+
+    pw.stop()
+    sys.exit(f"{BROWSERS[channel]} 를 띄우지 못했습니다: {first_error}")
+
+
+def _shutdown(pw, ctx) -> None:
+    """브라우저와 Playwright 를 정리한다. 어떤 방식으로 띄웠든 안전하게.
+
+    직접 띄운 브라우저는 반드시 '정상 종료'를 시켜야 한다. 강제로 죽이면
+    Chrome 이 쿠키·로컬스토리지를 디스크에 쓰기 전에 끝나서 로그인 세션이
+    통째로 날아간다. 다음 실행이 프로필 잠금과 부딪히지 않도록 프로세스가
+    완전히 끝날 때까지 기다린다.
+    """
+    if _SPAWNED:
+        while _SPAWNED:
+            proc, browser = _SPAWNED.pop()
+            try:
+                browser.close()  # CDP Browser.close - 세션을 저장하고 끝난다
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                proc.wait(timeout=30)
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=10)
+                except Exception:  # noqa: BLE001
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+    else:
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
         pw.stop()
-        sys.exit(f"{BROWSERS[channel]} 를 띄우지 못했습니다: {e}")
-    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    return pw, ctx, page
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _goto_suno(page, attempts: int = 5) -> bool:
@@ -257,8 +439,7 @@ def cmd_login(channel: str | None = None) -> int:
         print("시간이 초과됐습니다. 다시 실행해 주세요.")
         return 1
     finally:
-        ctx.close()
-        pw.stop()
+        _shutdown(pw, ctx)
 
 
 def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
@@ -270,13 +451,12 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
             return 1
         if not _is_logged_in(page):
             print(f"{BROWSERS[channel]} 에서 로그인이 필요합니다.  login  을 먼저 실행하세요.")
-            return 1
+            return NEED_LOGIN
 
         print("목록을 가져오는 중입니다... (곡이 많으면 1~2분 걸립니다)")
         result = page.evaluate(COLLECT_JS)
     finally:
-        ctx.close()
-        pw.stop()
+        _shutdown(pw, ctx)
 
     songs = result.get("songs") or []
     if not songs:
@@ -385,12 +565,84 @@ def _push(msg: str) -> None:
     print(msg, flush=True)
 
 
+class _WavMaker:
+    """WAV 가 없는 곡을 만나면 그 자리에서 변환을 요청하고 기다린다.
+
+    예전에는 목록 전체를 훑어 실패로 찍은 다음, 맨 마지막에 몰아서 변환을
+    요청했다. 곡이 수백 개면 첫 훑기만 십수 분이라 화면에는 X 만 잔뜩 쌓이고
+    다운로드는 시작조차 안 한 것처럼 보였다. 이제는 곡 하나마다
+    요청 -> 대기 -> 받기 를 끝내므로 진행이 눈에 보인다.
+
+    브라우저는 실제로 변환이 필요한 첫 곡에서만 연다. 전부 이미 있으면
+    창이 뜨지 않는다.
+    """
+
+    def __init__(self, log=None) -> None:
+        self.log = log or _push
+        self._session: tuple | None = None
+        self._off = False
+
+    def _ready(self) -> bool:
+        if self._off:
+            return False
+        if self._session:
+            return True
+        channel = _channel()
+        self.log("")
+        self.log(f"WAV 변환용 {BROWSERS[channel]} 창을 엽니다.")
+        self.log("(Suno 에서 다운로드 버튼을 누르는 것과 같은 동작입니다)")
+        try:
+            pw, ctx, page = _browser(headless=False, channel=channel)
+        except SystemExit as e:  # noqa: BLE001
+            self.log(f"브라우저를 띄우지 못해 WAV 생성을 건너뜁니다: {e}")
+            self._off = True
+            return False
+        if not _goto_suno(page) or not _is_logged_in(page):
+            self.log(f"{BROWSERS[channel]} 에서 로그인이 필요합니다. WAV 생성을 건너뜁니다.")
+            _shutdown(pw, ctx)
+            self._off = True
+            return False
+        self._session = (pw, ctx, page)
+        self.log("")
+        return True
+
+    def make(self, song: dict, wait: int = 90) -> int | None:
+        """변환을 요청하고 CDN 에 올라오면 크기를, 못 만들면 None 을 반환."""
+        if not self._ready():
+            return None
+        page = self._session[2]
+        try:
+            res = page.evaluate(CONVERT_JS, [song["id"]])
+        except Exception as e:  # noqa: BLE001
+            self.log(f"    변환 요청 실패: {e}")
+            return None
+
+        status = res[0]["status"] if res else "EX"
+        if status not in (200, 201, 202, 204):
+            self.log(f"    변환 요청이 거절됐습니다 (status {status})")
+            return None
+
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            size = dl.remote_size(song["wav_url"])
+            if size is not None:
+                return size
+            time.sleep(3)
+        self.log("    시간 안에 생성되지 않았습니다. 다음 곡으로 넘어갑니다.")
+        return None
+
+    def close(self) -> None:
+        if self._session:
+            _shutdown(self._session[0], self._session[1])
+            self._session = None
+
+
 def run_download(songs: list[dict], formats: list[str], workers: int = 1,
                  make_wav: bool = False) -> None:
     with _state_lock:
         STATE.update(running=True, finished=False, total=len(songs) * len(formats),
                      done=0, ok=0, skip=0, fail=0, current="", log=[])
-    need_wav: list[dict] = []
+    maker = _WavMaker() if make_wav else None
     try:
         for fmt in formats:
             out = HERE / fmt
@@ -408,10 +660,12 @@ def run_download(songs: list[dict], formats: list[str], workers: int = 1,
                     status, msg = "skip", "이미 있음"
                 else:
                     size = dl.remote_size(song[f"{fmt}_url"])
+                    if size is None and fmt == "wav" and maker:
+                        # 서버에 WAV 가 없다 — 지금 만들어 달라고 요청한다
+                        _push(f"    WAV 생성 요청 — {song['title'][:46]}")
+                        size = maker.make(song)
                     if size is None:
                         status, msg = "fail", f"{fmt.upper()} 없음 (서버 미생성)"
-                        if fmt == "wav":
-                            need_wav.append(song)
                     else:
                         status, msg = dl.download(song[f"{fmt}_url"], dest, size)
                         if status in ("ok", "skip"):
@@ -428,42 +682,12 @@ def run_download(songs: list[dict], formats: list[str], workers: int = 1,
                     manifest.save()
             manifest.save()
 
-        if need_wav and make_wav:
-            _push("")
-            _push(f"WAV 미생성 {len(need_wav)}곡 — 변환을 요청합니다.")
-            _push("(Suno 에서 다운로드 버튼을 누르는 것과 같은 동작입니다)")
-            with _state_lock:
-                STATE["current"] = "WAV 변환 요청 중..."
-            convert_wavs(need_wav, log=_push)
-            _push("생성될 때까지 기다리는 중...")
-            ready = wait_for_wavs(need_wav, log=_push)
-            if ready:
-                out = HERE / "wav"
-                manifest = dl.Manifest(out / dl.MANIFEST_NAME)
-                with _state_lock:
-                    STATE["total"] += len(ready)
-                for song in ready:
-                    dest = out / dl.safe_name(song["title"], song["index"], "wav")
-                    with _state_lock:
-                        STATE["current"] = f"WAV  {dest.name}"
-                    status, msg = dl.download(song["wav_url"], dest,
-                                              dl.remote_size(song["wav_url"]))
-                    if status in ("ok", "skip"):
-                        manifest.add(song["id"], song["title"], dest)
-                    else:
-                        failures.append(f"{song['title']} ({song['id']}): {msg}")
-                    with _state_lock:
-                        STATE["done"] += 1
-                        STATE[status] += 1
-                        STATE["fail"] = max(0, STATE["fail"] - 1)
-                        n, t = STATE["done"], STATE["total"]
-                    icon = {"ok": "OK", "skip": "-", "fail": "X"}[status]
-                    _push(f"[{n}/{t}] {icon} {dest.name}  ({msg})")
-                manifest.save()
         _push(f"\n완료 — 받음 {STATE['ok']}, 건너뜀 {STATE['skip']}, 실패 {STATE['fail']}")
     except Exception as e:  # noqa: BLE001
         _push(f"오류로 중단됐습니다: {e}")
     finally:
+        if maker:
+            maker.close()
         with _state_lock:
             STATE["running"] = False
             STATE["finished"] = True
@@ -682,8 +906,7 @@ def convert_wavs(need: list[dict], channel: str | None = None,
             title = next(s["title"] for s in need if s["id"] == r["id"])
             log(f"  {'OK' if good else '실패(%s)' % r['status']:10} {title[:46]}")
     finally:
-        ctx.close()
-        pw.stop()
+        _shutdown(pw, ctx)
     return ok
 
 
@@ -839,7 +1062,15 @@ def main() -> int:
         print()
         if cmd_login(channel) != 0:
             return 1
-    if cmd_sync(channel=channel) != 0:
+
+    rc = cmd_sync(channel=channel)
+    if rc == NEED_LOGIN:
+        # 프로필은 있는데 세션이 만료(또는 유실)된 경우 — 로그인부터 다시.
+        print()
+        if cmd_login(channel) != 0:
+            return 1
+        rc = cmd_sync(channel=channel)
+    if rc != 0:
         return 1
     return cmd_ui()
 
