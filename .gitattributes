@@ -1,0 +1,10 @@
+# 배치 파일은 반드시 CRLF 여야 한다.
+# LF 로 저장되면 cmd.exe 가 한글(UTF-8) 줄을 잘못 잘라 읽어
+# "...은(는) 내부 또는 외부 명령이 아닙니다" 오류를 내며 실행이 깨진다.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.py  text eol=lf
+*.js  text eol=lf
+*.html text eol=lf
+*.md  text eol=lf
