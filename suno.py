@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -491,6 +492,9 @@ def sync_filenames(songs: list[dict], apply: bool = True) -> list[tuple[str, str
     """Suno 에서 제목을 바꾼 곡의 로컬 파일 이름을 맞춰 준다.
 
     곡의 고유키(clip id)로 대조하므로 제목이 아무리 바뀌어도 짝이 흐트러지지 않는다.
+    기록(downloaded.json)이 없어도 파일명 앞의 번호로 찾아낸다 — 번호 역시 곡마다
+    고정이라, 음원 폴더만 다른 PC 로 옮겨 온 경우에도 이름이 맞춰진다.
+
     (fmt, 이전이름, 새이름) 목록을 돌려준다.
     """
     changes: list[tuple[str, str, str]] = []
@@ -501,25 +505,47 @@ def sync_filenames(songs: list[dict], apply: bool = True) -> list[tuple[str, str
         manifest = dl.Manifest(out / dl.MANIFEST_NAME)
         touched = False
 
+        # 번호 -> 실제 파일. 기록에 없는 파일을 찾아낼 때 쓴다.
+        by_index: dict[int, list[Path]] = {}
+        for p in out.glob(f"*.{fmt}"):
+            m = re.match(r"^(\d{3}) - ", p.name)
+            if m:
+                by_index.setdefault(int(m.group(1)), []).append(p)
+
         for song in songs:
-            rec = manifest.entries.get(song["id"])
-            if not rec:
-                continue
-            old = out / rec["file"]
             new = out / dl.safe_name(song["title"], song["index"], fmt)
-            if old.name == new.name or not old.is_file():
+            rec = manifest.entries.get(song["id"])
+
+            old = None
+            if rec:
+                cand = out / rec["file"]
+                if cand.is_file():
+                    old = cand
+            if old is None:
+                # 기록에 없거나 기록된 파일이 사라진 경우 — 번호로 찾는다.
+                # 번호는 곡마다 하나뿐이므로 후보가 정확히 1개일 때만 신뢰한다.
+                same = by_index.get(song["index"], [])
+                if len(same) == 1:
+                    old = same[0]
+            if old is None or old.name == new.name:
                 continue
-            if new.exists():
+
+            # Windows 는 파일명 대소문자를 구분하지 않는다. 제목에서 대소문자만
+            # 바뀐 경우 new.exists() 가 '자기 자신'을 가리켜 참이 되므로,
+            # 충돌로 오인해 건너뛰면 이름이 영영 갱신되지 않는다.
+            same_file = os.path.normcase(old.name) == os.path.normcase(new.name)
+            if new.exists() and not same_file:
                 print(f"  건너뜀 — 같은 이름이 이미 있음: {new.name}")
                 continue
+
             if apply:
                 try:
                     old.rename(new)
                 except OSError as e:
                     print(f"  이름 변경 실패: {old.name} ({e})")
                     continue
-                rec["file"] = new.name
-                rec["title"] = song["title"]
+                # 기록이 없던 파일이면 이 참에 채워 넣는다
+                manifest.add(song["id"], song["title"], new)
                 touched = True
             changes.append((fmt, old.name, new.name))
 
