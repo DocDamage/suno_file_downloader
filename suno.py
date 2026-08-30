@@ -634,6 +634,162 @@ def _load_library() -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 직접 넣은 WAV 받아들이기
+# --------------------------------------------------------------------------- #
+# Suno 사이트에서 손으로 받은 WAV 를 wav/ 폴더에 넣어두면, 그 파일이 어느 곡인지
+# 찾아내 기록에 넣고 "번호 - 곡이름.wav" 로 정리한 뒤 MP3 까지 만든다.
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_DUP_SUFFIX = re.compile(r"\s*[(\[]\s*\d+\s*[)\]]\s*$")      # "제목 (1)" 같은 꼬리표
+_KEEP = re.compile(r"[^0-9a-z\uac00-\ud7a3\u3131-\u318e\u3040-\u30ff\u4e00-\u9fff]+")
+
+
+def _norm_title(t: str) -> str:
+    """제목 비교용으로 다듬는다. 문장부호·공백·대소문자 차이를 없앤다."""
+    t = _DUP_SUFFIX.sub("", t.strip())
+    return _KEEP.sub("", t.lower())
+
+
+def _wav_seconds(path: Path) -> float | None:
+    """WAV 재생 길이(초). 표준 라이브러리만 쓴다."""
+    try:
+        import wave
+
+        with wave.open(str(path)) as w:
+            rate = w.getframerate()
+            return w.getnframes() / float(rate) if rate else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _match_song(path: Path, songs: list[dict], by_index: dict, by_title: dict) -> tuple:
+    """파일에 맞는 곡을 찾는다. (곡, 근거) 또는 (None, 사유)."""
+    stem = path.stem
+
+    # 1) 파일명에 clip id 가 들어 있으면 확실하다
+    hit = _UUID_RE.search(stem)
+    if hit:
+        for s in songs:
+            if s["id"].lower() == hit.group(0).lower():
+                return s, "파일명의 곡 ID"
+
+    # 2) 우리가 붙이는 "NNN - " 번호
+    m = re.match(r"^(\d{3})\s*-\s*", stem)
+    if m:
+        s = by_index.get(int(m.group(1)))
+        if s:
+            return s, "파일명의 번호"
+
+    # 3) 제목으로 찾는다
+    cands = by_title.get(_norm_title(stem), [])
+    if len(cands) == 1:
+        return cands[0], "제목 일치"
+    if len(cands) > 1:
+        # 제목이 같은 곡이 여럿이면 재생 길이로 가른다
+        secs = _wav_seconds(path)
+        if secs is not None:
+            near = [c for c in cands
+                    if c.get("duration") and abs(c["duration"] - secs) <= 1.5]
+            if len(near) == 1:
+                return near[0], f"제목 + 길이({secs:.0f}초)"
+            if len(near) > 1:
+                return None, f"제목과 길이가 같은 곡이 {len(near)}개라 가릴 수 없음"
+        return None, f"같은 제목의 곡이 {len(cands)}개라 가릴 수 없음"
+
+    return None, "목록에서 같은 제목을 찾지 못함"
+
+
+def scan_wavs(dry_run: bool = False, make_mp3: bool = True, quiet: bool = False) -> int:
+    """wav/ 폴더의 기록에 없는 파일을 받아들인다. 처리한 개수를 반환."""
+    songs = _load_library().get("songs", [])
+    if not songs:
+        if not quiet:
+            print("목록이 없습니다.  sync  를 먼저 실행하세요.")
+        return 0
+
+    out = HERE / "wav"
+    if not out.is_dir():
+        return 0
+    manifest = dl.Manifest(out / dl.MANIFEST_NAME)
+
+    known = {rec["file"] for rec in manifest.entries.values()}
+    orphans = [p for p in sorted(out.glob("*.wav"))
+               if p.name not in known and p.stat().st_size > 0]
+    if not orphans:
+        if not quiet:
+            print("wav 폴더에 새로 넣은 파일이 없습니다.")
+        return 0
+
+    print(f"\nwav 폴더에서 기록에 없는 파일 {len(orphans)}개를 찾았습니다.")
+
+    by_index = {s["index"]: s for s in songs}
+    by_title: dict[str, list[dict]] = {}
+    for s in songs:
+        by_title.setdefault(_norm_title(s["title"]), []).append(s)
+
+    taken = {sid for sid in manifest.entries}          # 이미 WAV 가 있는 곡
+    handled, skipped = [], []
+
+    for path in orphans:
+        song, why = _match_song(path, songs, by_index, by_title)
+        if song is None:
+            skipped.append((path.name, why))
+            continue
+        if song["id"] in taken:
+            skipped.append((path.name, f"#{song['index']} 는 이미 WAV 가 있습니다"))
+            continue
+
+        dest = out / dl.safe_name(song["title"], song["index"], "wav")
+        if dry_run:
+            handled.append((path.name, dest.name, why, "—"))
+            taken.add(song["id"])
+            continue
+
+        if dest.exists() and dest.resolve() != path.resolve():
+            skipped.append((path.name, f"같은 이름이 이미 있음: {dest.name}"))
+            continue
+        try:
+            if dest.name != path.name:
+                path.rename(dest)
+        except OSError as e:
+            skipped.append((path.name, f"이름 변경 실패 ({e})"))
+            continue
+
+        manifest.add(song["id"], song["title"], dest)
+        taken.add(song["id"])
+
+        mp3_msg = "건너뜀"
+        if make_mp3:
+            mp3_out = HERE / "mp3"
+            mp3_dest = mp3_out / dl.safe_name(song["title"], song["index"], "mp3")
+            mp3_man = dl.Manifest(mp3_out / dl.MANIFEST_NAME)
+            if mp3_man.has(song["id"], mp3_out) or mp3_dest.is_file():
+                mp3_msg = "이미 있음"
+            else:
+                st, ms = dl.to_mp3(dest, mp3_dest)
+                mp3_msg = ms if st == "ok" else f"실패: {ms}"
+                if st == "ok":
+                    mp3_man.add(song["id"], song["title"], mp3_dest)
+                    mp3_man.save()
+        handled.append((path.name, dest.name, why, mp3_msg))
+
+    if not dry_run and handled:
+        manifest.save()
+
+    if handled:
+        print(f"\n{'받아들일 예정' if dry_run else '정리했습니다'} — {len(handled)}개")
+        for src, dst, why, mp3 in handled:
+            print(f"  {src}")
+            print(f"    -> {dst}   ({why})")
+            if make_mp3 and not dry_run:
+                print(f"       MP3: {mp3}")
+    if skipped:
+        print(f"\n손대지 않은 파일 — {len(skipped)}개")
+        for name, why in skipped:
+            print(f"  {name}\n    ({why})")
+    return len(handled)
+
+
+# --------------------------------------------------------------------------- #
 # 다운로드 작업 (UI / CLI 공용)
 # --------------------------------------------------------------------------- #
 STATE: dict = {
@@ -1117,6 +1273,11 @@ def main() -> int:
     p_mw.add_argument("--browser", choices=("chrome", "msedge"))
     p_mw.add_argument("--no-download", action="store_true", help="변환만 하고 받지 않기")
 
+    p_scan = sub.add_parser(
+        "scan", help="직접 넣은 WAV 를 찾아 이름 정리 + 기록 + MP3 변환 (실행 시 자동)")
+    p_scan.add_argument("--dry-run", action="store_true", help="바꾸지 않고 결과만 보기")
+    p_scan.add_argument("--no-mp3", action="store_true", help="MP3 변환은 하지 않기")
+
     p_ren = sub.add_parser("rename", help="제목이 바뀐 곡의 파일 이름 맞추기 (sync 시 자동 실행됨)")
     p_ren.add_argument("--dry-run", action="store_true", help="바꾸지 않고 목록만 보기")
 
@@ -1137,6 +1298,9 @@ def main() -> int:
     if args.cmd == "makewav":
         return cmd_makewav(dry_run=args.dry_run, channel=args.browser,
                            download=not args.no_download)
+    if args.cmd == "scan":
+        scan_wavs(dry_run=args.dry_run, make_mp3=not args.no_mp3)
+        return 0
     if args.cmd == "rename":
         songs = _load_library().get("songs", [])
         if not songs:
@@ -1184,6 +1348,8 @@ def main() -> int:
         rc = cmd_sync(channel=channel)
     if rc != 0:
         return 1
+    # 손으로 받아 wav 폴더에 넣어둔 파일이 있으면 정리해서 받아들인다
+    scan_wavs(quiet=True)
     return cmd_ui()
 
 
