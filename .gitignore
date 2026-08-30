@@ -38,3 +38,6 @@ desktop.ini
 
 # 배포용 zip (Releases 에 올림)
 SunoDownloader-win64.zip
+
+# 서버에서 사라져 치워둔 파일
+_removed/

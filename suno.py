@@ -535,6 +535,9 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
     LIBRARY.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"Liked {len(songs)}곡을 {LIBRARY.name} 에 저장했습니다.")
 
+    # 목록에서 사라진 곡의 파일을 먼저 치운다. 그래야 번호가 비어
+    # 다시 매겨진 곡과 이름이 부딪히지 않는다.
+    cleanup_removed(songs, quiet=True)
     # Suno 에서 제목을 고쳤다면 받아둔 파일 이름도 따라가게 한다
     _report_renames(sync_filenames(songs))
     return 0
@@ -612,6 +615,97 @@ def sync_filenames(songs: list[dict], apply: bool = True) -> list[tuple[str, str
 
         manifest.save()
     return changes
+
+
+# 목록에서 사라진 곡이 이 비율을 넘으면 자동 정리를 멈춘다. 동기화가 잘못돼
+# 목록이 반쪽만 왔을 때 파일을 무더기로 치우는 사고를 막는다.
+CLEANUP_GUARD = 0.10
+
+
+def cleanup_removed(songs: list[dict], apply: bool = True, purge: bool = False,
+                    quiet: bool = False) -> int:
+    """서버 목록에 없는 곡의 로컬 파일을 치운다.
+
+    좋아요를 해제하거나 Suno 에서 지운 곡이 여기 해당한다. 그냥 두면 옛 번호를
+    단 채 남아 새로 번호를 받은 곡과 이름이 부딪힌다.
+
+    9/3 이후로는 다시 받기 어려우므로 기본은 삭제가 아니라 `_removed/` 로
+    옮기기다. 정말 지우려면 purge=True.
+    """
+    live = {s["id"] for s in songs}
+    if not live:
+        return 0
+
+    targets: list[tuple[str, Path, str, str]] = []   # (fmt, path, clip_id, title)
+    total_known = 0
+    for fmt in ("wav", "mp3"):
+        out = HERE / fmt
+        if not out.is_dir():
+            continue
+        manifest = dl.Manifest(out / dl.MANIFEST_NAME)
+        total_known += len(manifest.entries)
+        for cid, rec in manifest.entries.items():
+            if cid in live:
+                continue
+            p = out / rec["file"]
+            if p.is_file():
+                targets.append((fmt, p, cid, rec.get("title", "")))
+
+    if not targets:
+        if not quiet:
+            print("서버 목록에 없는 파일은 없습니다.")
+        return 0
+
+    # 안전장치 — 한꺼번에 너무 많이 사라졌다면 동기화가 잘못됐을 수 있다
+    stale_ids = {cid for _, _, cid, _ in targets}
+    if total_known and len(stale_ids) > max(20, total_known * CLEANUP_GUARD):
+        print(f"\n⚠ 서버 목록에 없는 곡이 {len(stale_ids)}개나 됩니다. "
+              f"동기화가 잘못됐을 수 있어 자동 정리를 건너뜁니다.")
+        print("  확인 후 정리하려면:  cleanup --dry-run  으로 먼저 보세요.")
+        return 0
+
+    where = "지웁니다" if purge else f"{HERE / '_removed'} 로 옮깁니다"
+    print(f"\n서버 목록에 없는 곡 {len(stale_ids)}개 · 파일 {len(targets)}개를 "
+          f"{'정리할 예정입니다' if not apply else where}.")
+    for fmt, p, _, _ in targets:
+        print(f"  [{fmt}] {p.name}  ({p.stat().st_size / 2**20:.1f} MB)")
+    if not apply:
+        print("\n--dry-run 이라 파일은 그대로입니다.")
+        return 0
+
+    moved = 0
+    for fmt in ("wav", "mp3"):
+        out = HERE / fmt
+        if not out.is_dir():
+            continue
+        manifest = dl.Manifest(out / dl.MANIFEST_NAME)
+        touched = False
+        for f, p, cid, _ in [t for t in targets if t[0] == fmt]:
+            try:
+                if purge:
+                    p.unlink()
+                else:
+                    trash = HERE / "_removed" / fmt
+                    trash.mkdir(parents=True, exist_ok=True)
+                    dest = trash / p.name
+                    n = 1
+                    while dest.exists():           # 같은 이름이 이미 있으면 번호를 붙인다
+                        dest = trash / f"{p.stem} ({n}){p.suffix}"
+                        n += 1
+                    p.rename(dest)
+                moved += 1
+            except OSError as e:
+                print(f"  실패: {p.name} ({e})")
+                continue
+            manifest.entries.pop(cid, None)
+            touched = True
+        if touched:
+            manifest.save()
+
+    print(f"\n{'삭제' if purge else '이동'} 완료 — {moved}개")
+    if not purge:
+        print(f"  필요 없으면 {HERE / '_removed'} 폴더를 지우세요.")
+    return moved
 
 
 def _report_renames(changes: list[tuple[str, str, str]], apply: bool = True) -> None:
@@ -1273,6 +1367,12 @@ def main() -> int:
     p_mw.add_argument("--browser", choices=("chrome", "msedge"))
     p_mw.add_argument("--no-download", action="store_true", help="변환만 하고 받지 않기")
 
+    p_cl = sub.add_parser(
+        "cleanup", help="서버 목록에 없는 곡의 로컬 파일 치우기 (실행 시 자동)")
+    p_cl.add_argument("--dry-run", action="store_true", help="치우지 않고 목록만 보기")
+    p_cl.add_argument("--purge", action="store_true",
+                      help="_removed 로 옮기지 않고 바로 삭제")
+
     p_scan = sub.add_parser(
         "scan", help="직접 넣은 WAV 를 찾아 이름 정리 + 기록 + MP3 변환 (실행 시 자동)")
     p_scan.add_argument("--dry-run", action="store_true", help="바꾸지 않고 결과만 보기")
@@ -1298,6 +1398,13 @@ def main() -> int:
     if args.cmd == "makewav":
         return cmd_makewav(dry_run=args.dry_run, channel=args.browser,
                            download=not args.no_download)
+    if args.cmd == "cleanup":
+        songs = _load_library().get("songs", [])
+        if not songs:
+            print("목록이 없습니다.  sync  를 먼저 실행하세요.")
+            return 1
+        cleanup_removed(songs, apply=not args.dry_run, purge=args.purge)
+        return 0
     if args.cmd == "scan":
         scan_wavs(dry_run=args.dry_run, make_mp3=not args.no_mp3)
         return 0
