@@ -520,24 +520,16 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
         print("Liked 곡을 찾지 못했습니다.")
         return 1
 
-    # 파일 번호를 곡 id 에 고정한다 — 새 곡이 추가돼도 기존 번호가 밀리지 않는다
-    old = _load_library()
-    index_map: dict[str, int] = {s["id"]: s["index"] for s in old.get("songs", []) if "index" in s}
-    # 번호는 절대 뒤로 가지 않는다 — 지난 값, 파일명, 목록 중 가장 큰 것에서 이어간다
-    nxt = max(max(index_map.values(), default=0),
-              old.get("next_index", 1) - 1,
-              _highest_used_index()) + 1
-    for s in songs:
-        if s["id"] not in index_map:
-            index_map[s["id"]] = nxt
-            nxt += 1
-        s["index"] = index_map[s["id"]]
+    # 번호는 만든 날짜 순서로 매긴다 — 가장 오래된 곡이 1번.
+    # 순위로 정의하면 어느 PC 에서 계산해도 같은 번호가 나온다.
+    for rank, s2 in enumerate(
+            sorted(songs, key=lambda x: (x.get("created_at") or "", x["id"])), start=1):
+        s2["index"] = rank
 
     payload = {
         "synced_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "scanned_total": result.get("scanned_total"),
         "server_side_filter": result.get("server_side_filter"),
-        "next_index": nxt,
         "songs": songs,
     }
     LIBRARY.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -549,11 +541,14 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
 
 
 def sync_filenames(songs: list[dict], apply: bool = True) -> list[tuple[str, str, str]]:
-    """Suno 에서 제목을 바꾼 곡의 로컬 파일 이름을 맞춰 준다.
+    """파일 이름을 현재 제목·번호에 맞춘다.
 
-    곡의 고유키(clip id)로 대조하므로 제목이 아무리 바뀌어도 짝이 흐트러지지 않는다.
-    기록(downloaded.json)이 없어도 파일명 앞의 번호로 찾아낸다 — 번호 역시 곡마다
-    고정이라, 음원 폴더만 다른 PC 로 옮겨 온 경우에도 이름이 맞춰진다.
+    곡의 고유키(clip id)로 기록과 대조하므로 제목이 바뀌든 번호가 다시
+    매겨지든 짝이 흐트러지지 않는다.
+
+    번호가 통째로 바뀌면 서로 자리를 맞바꾸는 곡이 생긴다(1번이 785번이 되고
+    785번이 1번이 되는 식). 그대로 하나씩 옮기면 "이미 있는 이름" 이라 전부
+    막히므로, 임시 이름으로 한 번 비켜 두었다가 최종 이름으로 옮긴다.
 
     (fmt, 이전이름, 새이름) 목록을 돌려준다.
     """
@@ -563,58 +558,59 @@ def sync_filenames(songs: list[dict], apply: bool = True) -> list[tuple[str, str
         if not out.is_dir():
             continue
         manifest = dl.Manifest(out / dl.MANIFEST_NAME)
-        touched = False
 
-        # 번호 -> 실제 파일. 기록에 없는 파일을 찾아낼 때 쓴다.
-        exts = (fmt, "m4a") if fmt == "mp3" else (fmt,)
-        by_index: dict[int, list[Path]] = {}
-        for p in (q for e in exts for q in out.glob(f"*.{e}")):
-            m = re.match(r"^(\d{3}) - ", p.name)
-            if m:
-                by_index.setdefault(int(m.group(1)), []).append(p)
-
+        plan: list[tuple[dict, Path, Path]] = []
         for song in songs:
             rec = manifest.entries.get(song["id"])
-
-            old = None
-            if rec:
-                cand = out / rec["file"]
-                if cand.is_file():
-                    old = cand
-            if old is None:
-                # 기록에 없거나 기록된 파일이 사라진 경우 — 번호로 찾는다.
-                # 번호는 곡마다 하나뿐이므로 후보가 정확히 1개일 때만 신뢰한다.
-                same = by_index.get(song["index"], [])
-                if len(same) == 1:
-                    old = same[0]
-            if old is None:
+            if not rec:
                 continue
-            # 실제 파일의 확장자를 그대로 유지한다 (mp3 대신 m4a 로 받은 경우)
+            old = out / rec["file"]
+            if not old.is_file():
+                continue
+            # 실제 파일의 확장자를 그대로 유지한다
             new = out / dl.safe_name(song["title"], song["index"], old.suffix.lstrip("."))
-            if old.name == new.name:
-                continue
+            if old.name != new.name:
+                plan.append((song, old, new))
 
-            # Windows 는 파일명 대소문자를 구분하지 않는다. 제목에서 대소문자만
-            # 바뀐 경우 new.exists() 가 '자기 자신'을 가리켜 참이 되므로,
-            # 충돌로 오인해 건너뛰면 이름이 영영 갱신되지 않는다.
-            same_file = os.path.normcase(old.name) == os.path.normcase(new.name)
-            if new.exists() and not same_file:
+        if not plan:
+            continue
+        if not apply:
+            changes += [(fmt, o.name, n.name) for _, o, n in plan]
+            continue
+
+        # 1단계 — 옮길 파일을 전부 임시 이름으로 비켜 둔다
+        staged: list[tuple[dict, Path, Path, str]] = []
+        for song, old, new in plan:
+            tmp = out / f".renaming-{song['id']}{old.suffix}"
+            try:
+                old.rename(tmp)
+            except OSError as e:
+                print(f"  이름 변경 실패: {old.name} ({e})")
+                continue
+            staged.append((song, tmp, new, old.name))
+
+        # 2단계 — 최종 이름으로
+        for song, tmp, new, oldname in staged:
+            if new.exists():
                 print(f"  건너뜀 — 같은 이름이 이미 있음: {new.name}")
-                continue
-
-            if apply:
                 try:
-                    old.rename(new)
-                except OSError as e:
-                    print(f"  이름 변경 실패: {old.name} ({e})")
-                    continue
-                # 기록이 없던 파일이면 이 참에 채워 넣는다
-                manifest.add(song["id"], song["title"], new)
-                touched = True
-            changes.append((fmt, old.name, new.name))
+                    tmp.rename(out / oldname)      # 원래 이름으로 되돌린다
+                except OSError:
+                    print(f"  ! 되돌리지 못했습니다: {tmp.name}")
+                continue
+            try:
+                tmp.rename(new)
+            except OSError as e:
+                print(f"  이름 변경 실패: {new.name} ({e})")
+                try:
+                    tmp.rename(out / oldname)
+                except OSError:
+                    print(f"  ! 되돌리지 못했습니다: {tmp.name}")
+                continue
+            manifest.add(song["id"], song["title"], new)
+            changes.append((fmt, oldname, new.name))
 
-        if touched:
-            manifest.save()
+        manifest.save()
     return changes
 
 
@@ -626,25 +622,6 @@ def _report_renames(changes: list[tuple[str, str, str]], apply: bool = True) -> 
     print(f"\n{head} — {len(changes)}개")
     for fmt, old, new in changes:
         print(f"  [{fmt}] {old}\n       -> {new}")
-
-
-def _highest_used_index() -> int:
-    """이미 쓰인 번호 중 가장 큰 값.
-
-    좋아요를 해제하면 그 곡이 목록에서 빠지므로 최댓값이 내려간다. 그대로
-    두면 새 곡이 사라진 번호를 물려받아 남아 있는 파일과 부딪힌다. 파일명까지
-    살펴서 번호가 뒤로 가지 않게 한다.
-    """
-    top = 0
-    for folder in ("wav", "mp3"):
-        d = HERE / folder
-        if not d.is_dir():
-            continue
-        for entry in d.iterdir():
-            m = re.match(r"^(\d{3})\s*-\s*", entry.name)
-            if m:
-                top = max(top, int(m.group(1)))
-    return top
 
 
 def _load_library() -> dict:
