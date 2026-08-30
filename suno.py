@@ -523,7 +523,10 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
     # 파일 번호를 곡 id 에 고정한다 — 새 곡이 추가돼도 기존 번호가 밀리지 않는다
     old = _load_library()
     index_map: dict[str, int] = {s["id"]: s["index"] for s in old.get("songs", []) if "index" in s}
-    nxt = max(index_map.values(), default=0) + 1
+    # 번호는 절대 뒤로 가지 않는다 — 지난 값, 파일명, 목록 중 가장 큰 것에서 이어간다
+    nxt = max(max(index_map.values(), default=0),
+              old.get("next_index", 1) - 1,
+              _highest_used_index()) + 1
     for s in songs:
         if s["id"] not in index_map:
             index_map[s["id"]] = nxt
@@ -534,6 +537,7 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
         "synced_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "scanned_total": result.get("scanned_total"),
         "server_side_filter": result.get("server_side_filter"),
+        "next_index": nxt,
         "songs": songs,
     }
     LIBRARY.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -622,6 +626,25 @@ def _report_renames(changes: list[tuple[str, str, str]], apply: bool = True) -> 
     print(f"\n{head} — {len(changes)}개")
     for fmt, old, new in changes:
         print(f"  [{fmt}] {old}\n       -> {new}")
+
+
+def _highest_used_index() -> int:
+    """이미 쓰인 번호 중 가장 큰 값.
+
+    좋아요를 해제하면 그 곡이 목록에서 빠지므로 최댓값이 내려간다. 그대로
+    두면 새 곡이 사라진 번호를 물려받아 남아 있는 파일과 부딪힌다. 파일명까지
+    살펴서 번호가 뒤로 가지 않게 한다.
+    """
+    top = 0
+    for folder in ("wav", "mp3"):
+        d = HERE / folder
+        if not d.is_dir():
+            continue
+        for entry in d.iterdir():
+            m = re.match(r"^(\d{3})\s*-\s*", entry.name)
+            if m:
+                top = max(top, int(m.group(1)))
+    return top
 
 
 def _load_library() -> dict:
