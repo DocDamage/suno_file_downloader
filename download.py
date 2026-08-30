@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import ssl
 import sys
 import threading
@@ -155,6 +156,60 @@ def download(url: str, dest: Path, expected: int | None) -> tuple[str, str]:
             if attempt < RETRIES:
                 time.sleep(1.5 * attempt)
     return "fail", last_err
+
+
+# --------------------------------------------------------------------------- #
+# WAV -> MP3 변환
+# --------------------------------------------------------------------------- #
+# Suno 가 MP3 직접 내려받기를 막았고(cdn1 403), media_urls 의 m4a 는 암호화돼
+# 있어 재생되지 않는다. 그래서 MP3 는 서버에서 받지 않고 무손실 WAV 에서 직접
+# 만든다. Suno 원본 MP3 가 180kbps 안팎이라 192k 로 맞춘다.
+MP3_BITRATE = "192k"
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # 콘솔 창이 깜빡이지 않게
+
+
+def ffmpeg_exe() -> str | None:
+    """쓸 수 있는 ffmpeg 경로. 시스템에 있으면 그걸, 없으면 pip 로 받은 것을."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        return exe if exe and Path(exe).is_file() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def to_mp3(wav: Path, dest: Path, bitrate: str = MP3_BITRATE) -> tuple[str, str]:
+    """WAV 를 MP3 로 변환한다. (상태, 메시지) 반환."""
+    exe = ffmpeg_exe()
+    if not exe:
+        return "fail", "ffmpeg 이 없습니다 (pip install imageio-ffmpeg)"
+    if not wav.is_file() or wav.stat().st_size == 0:
+        return "fail", "원본 WAV 가 없습니다"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    # 임시 파일이 .part 로 끝나 ffmpeg 이 형식을 못 알아채므로 -f mp3 로 못박는다
+    cmd = [exe, "-nostdin", "-loglevel", "error", "-y", "-i", str(wav),
+           "-vn", "-c:a", "libmp3lame", "-b:a", bitrate, "-f", "mp3", str(part)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=900,
+                           creationflags=_NO_WINDOW)
+        if r.returncode != 0 or not part.is_file() or part.stat().st_size == 0:
+            part.unlink(missing_ok=True)
+            err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+            return "fail", (err[-1][:120] if err else f"ffmpeg 실패 (코드 {r.returncode})")
+        part.replace(dest)
+        return "ok", f"{dest.stat().st_size / 1_048_576:.1f} MB · WAV 에서 변환"
+    except subprocess.TimeoutExpired:
+        part.unlink(missing_ok=True)
+        return "fail", "변환 시간 초과"
+    except Exception as e:  # noqa: BLE001
+        part.unlink(missing_ok=True)
+        return "fail", str(e)[:120]
 
 
 # --------------------------------------------------------------------------- #

@@ -242,7 +242,7 @@ function play(id){
   });
   $('bTitle').textContent = s ? s.title : '';
   $('bArt').src = s ? artUrl(s) : '';
-  $('bSrc').textContent = HAVE.mp3.has(id) ? '내 파일' : '스트리밍';
+  $('bSrc').textContent = HAVE.mp3.has(id) ? 'MP3' : (HAVE.wav.has(id) ? 'WAV' : '없음');
   $('bar').classList.add('on');
   render();
 }

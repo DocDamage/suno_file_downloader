@@ -135,6 +135,17 @@ async () => {
     await sleep(120);
   }
 
+  // audio_url 은 요즘 '/api/forbidden' 으로 막혀서 내려온다. 실제 주소는
+  // media_urls 안에 있으므로 거기서 골라 쓴다.
+  const usable = (u) => (typeof u === 'string' && u && u.indexOf('/api/forbidden') === -1)
+    ? u : null;
+  const pick = (c, kind) => {
+    const media = Array.isArray(c.media_urls) ? c.media_urls : [];
+    const hit = media.find(m => m && typeof m.content_type === 'string'
+                                && m.content_type.indexOf(kind) === 0 && usable(m.url));
+    return hit ? hit.url : null;
+  };
+
   const liked = [...seen.values()].filter(c => c.is_liked === true);
   return {
     scanned_total: seen.size,
@@ -148,7 +159,9 @@ async () => {
       model: c.model_name || c.major_model_version || null,
       image_url: c.image_url || ('https://cdn2.suno.ai/image_' + c.id + '.jpeg'),
       wav_url: 'https://cdn1.suno.ai/' + c.id + '.wav',
-      mp3_url: c.audio_url || ('https://cdn1.suno.ai/' + c.id + '.mp3'),
+      mp3_url: pick(c, 'mp3') || usable(c.audio_url)
+               || ('https://cdn1.suno.ai/' + c.id + '.mp3'),
+      m4a_url: pick(c, 'm4a'),
     })),
   };
 }
@@ -403,6 +416,49 @@ def _goto_suno(page, attempts: int = 5) -> bool:
     return False
 
 
+def _settle(page, timeout: float = 15.0) -> None:
+    """SPA 가 스스로 한 번 더 이동하는 것까지 가라앉기를 기다린다."""
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=int(timeout * 1000))
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # Clerk 이 뜨면 앱 초기화가 끝난 것으로 본다
+        page.wait_for_function(
+            "() => window.Clerk && window.Clerk.loaded === true", timeout=int(timeout * 1000)
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(1.0)
+
+
+def _evaluate(page, js: str, arg=None, attempts: int = 4):
+    """page.evaluate 를 재시도와 함께 실행한다.
+
+    suno.com 은 첫 로딩 직후 내부적으로 한 번 더 이동한다. 그 순간에 스크립트가
+    돌고 있으면 'Execution context was destroyed' 로 통째로 죽는다. 페이지가
+    가라앉기를 기다렸다가 실행하고, 그래도 걸리면 다시 시도한다.
+    """
+    last = None
+    for i in range(1, attempts + 1):
+        _settle(page)
+        try:
+            return page.evaluate(js, arg) if arg is not None else page.evaluate(js)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            msg = str(e)
+            transient = (
+                "Execution context was destroyed" in msg
+                or "navigating" in msg
+                or "Target closed" in msg
+                or "Cannot find context" in msg
+            )
+            if not transient or i == attempts:
+                raise
+            print(f"  페이지가 이동해 다시 시도합니다 ({i}/{attempts})...")
+            time.sleep(2)
+    raise last  # 여기까지 오지 않는다
+
+
 def _is_logged_in(page) -> bool:
     try:
         page.wait_for_function("() => typeof window.Clerk !== 'undefined'", timeout=30_000)
@@ -455,7 +511,7 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
             return NEED_LOGIN
 
         print("목록을 가져오는 중입니다... (곡이 많으면 1~2분 걸립니다)")
-        result = page.evaluate(COLLECT_JS)
+        result = _evaluate(page, COLLECT_JS)
     finally:
         _shutdown(pw, ctx)
 
@@ -506,14 +562,14 @@ def sync_filenames(songs: list[dict], apply: bool = True) -> list[tuple[str, str
         touched = False
 
         # 번호 -> 실제 파일. 기록에 없는 파일을 찾아낼 때 쓴다.
+        exts = (fmt, "m4a") if fmt == "mp3" else (fmt,)
         by_index: dict[int, list[Path]] = {}
-        for p in out.glob(f"*.{fmt}"):
+        for p in (q for e in exts for q in out.glob(f"*.{e}")):
             m = re.match(r"^(\d{3}) - ", p.name)
             if m:
                 by_index.setdefault(int(m.group(1)), []).append(p)
 
         for song in songs:
-            new = out / dl.safe_name(song["title"], song["index"], fmt)
             rec = manifest.entries.get(song["id"])
 
             old = None
@@ -527,7 +583,11 @@ def sync_filenames(songs: list[dict], apply: bool = True) -> list[tuple[str, str
                 same = by_index.get(song["index"], [])
                 if len(same) == 1:
                     old = same[0]
-            if old is None or old.name == new.name:
+            if old is None:
+                continue
+            # 실제 파일의 확장자를 그대로 유지한다 (mp3 대신 m4a 로 받은 경우)
+            new = out / dl.safe_name(song["title"], song["index"], old.suffix.lstrip("."))
+            if old.name == new.name:
                 continue
 
             # Windows 는 파일명 대소문자를 구분하지 않는다. 제목에서 대소문자만
@@ -591,6 +651,44 @@ def _push(msg: str) -> None:
     print(msg, flush=True)
 
 
+# 새로 만든 곡의 WAV 는 cdn1.suno.ai 에 올라오지 않는다. 변환을 요청한 뒤
+# /api/gen/{id}/wav_file/ 가 알려주는 '서명된 S3 주소'로 받아야 한다.
+# 그 주소는 GET 전용으로 서명돼 있어 HEAD 로 크기를 미리 잴 수 없다.
+WAV_URL_JS = r"""
+async (clipId) => {
+  const API = 'https://studio-api.prod.suno.com';
+  const tok = () => window.Clerk.session.getToken();
+
+  const wavUrl = async () => {
+    const r = await fetch(API + `/api/gen/${clipId}/wav_file/`, {
+      headers: { Authorization: 'Bearer ' + (await tok()) }, credentials: 'include' });
+    if (!r.ok) return null;
+    let j = null;
+    try { j = await r.json(); } catch (e) { return null; }
+    return (j && j.wav_file_url) || null;
+  };
+
+  let url = await wavUrl();          // 이미 만들어져 있으면 바로 준다
+  if (url) return { ok: true, url };
+
+  const post = await fetch(API + `/api/gen/${clipId}/convert_wav/`, {
+    method: 'POST', credentials: 'include',
+    headers: { Authorization: 'Bearer ' + (await tok()), 'Content-Type': 'application/json' },
+    body: '{}' });
+  if (![200, 201, 202, 204].includes(post.status)) {
+    return { ok: false, status: post.status };
+  }
+
+  for (let i = 0; i < 40; i++) {     // 최대 약 2분
+    await new Promise(r => setTimeout(r, 3000));
+    url = await wavUrl();
+    if (url) return { ok: true, url };
+  }
+  return { ok: false, status: 'timeout' };
+}
+"""
+
+
 class _WavMaker:
     """WAV 가 없는 곡을 만나면 그 자리에서 변환을 요청하고 기다린다.
 
@@ -632,29 +730,19 @@ class _WavMaker:
         self.log("")
         return True
 
-    def make(self, song: dict, wait: int = 90) -> int | None:
-        """변환을 요청하고 CDN 에 올라오면 크기를, 못 만들면 None 을 반환."""
+    def make(self, song: dict) -> str | None:
+        """변환을 요청하고 받을 수 있는 주소를 돌려준다. 실패하면 None."""
         if not self._ready():
             return None
         page = self._session[2]
         try:
-            res = page.evaluate(CONVERT_JS, [song["id"]])
+            res = _evaluate(page, WAV_URL_JS, song["id"])
         except Exception as e:  # noqa: BLE001
             self.log(f"    변환 요청 실패: {e}")
             return None
-
-        status = res[0]["status"] if res else "EX"
-        if status not in (200, 201, 202, 204):
-            self.log(f"    변환 요청이 거절됐습니다 (status {status})")
-            return None
-
-        deadline = time.time() + wait
-        while time.time() < deadline:
-            size = dl.remote_size(song["wav_url"])
-            if size is not None:
-                return size
-            time.sleep(3)
-        self.log("    시간 안에 생성되지 않았습니다. 다음 곡으로 넘어갑니다.")
+        if res and res.get("ok"):
+            return res["url"]
+        self.log(f"    WAV 를 만들지 못했습니다 (status {res.get('status') if res else '?'})")
         return None
 
     def close(self) -> None:
@@ -663,51 +751,119 @@ class _WavMaker:
             self._session = None
 
 
+def _local_file(man, out: Path, song: dict, ext: str) -> Path | None:
+    """이미 갖고 있는 파일. 기록을 먼저 보고, 없으면 예상 이름으로 확인한다."""
+    if man:
+        p = man.has(song["id"], out)
+        if p:
+            return p
+    p = out / dl.safe_name(song["title"], song["index"], ext)
+    return p if p.is_file() and p.stat().st_size > 0 else None
+
+
+def _fetch_wav(song: dict, dest: Path, maker) -> tuple[str, str]:
+    """WAV 를 내려받는다. 서버에 없으면 만들어 달라고 요청한 뒤 받는다."""
+    url = song["wav_url"]
+    size = dl.remote_size(url)
+    if size is None and maker:
+        _push(f"    WAV 생성 요청 — {song['title'][:46]}")
+        signed = maker.make(song)
+        if signed:
+            # 새로 만든 WAV 는 서명된 주소로 온다. GET 전용이라 크기를 못 잰다.
+            url, size = signed, -1
+    if size is None:
+        return "fail", "WAV 없음 (서버 미생성)"
+    return dl.download(url, dest, None if size < 0 else size)
+
+
 def run_download(songs: list[dict], formats: list[str], workers: int = 1,
                  make_wav: bool = False) -> None:
+    """WAV 는 서버에서 받고, MP3 는 그 WAV 에서 변환해 만든다.
+
+    Suno 가 MP3 직접 내려받기를 막았기 때문에 MP3 를 따로 받지 않는다.
+    무손실 WAV 한 번만 받아 두면 MP3 는 언제든 다시 만들 수 있고,
+    변환은 Suno 를 거치지 않으므로 다운로드 한도와도 무관하다.
+    """
+    want = [f for f in ("wav", "mp3") if f in formats]
     with _state_lock:
-        STATE.update(running=True, finished=False, total=len(songs) * len(formats),
+        STATE.update(running=True, finished=False, total=len(songs) * len(want),
                      done=0, ok=0, skip=0, fail=0, current="", log=[])
+
     maker = _WavMaker() if make_wav else None
+    wav_out, mp3_out = HERE / "wav", HERE / "mp3"
+    wav_out.mkdir(parents=True, exist_ok=True)
+    wav_man = dl.Manifest(wav_out / dl.MANIFEST_NAME)
+    mp3_man = None
+    if "mp3" in want:
+        mp3_out.mkdir(parents=True, exist_ok=True)
+        mp3_man = dl.Manifest(mp3_out / dl.MANIFEST_NAME)
+
+    def tick(status: str, name: str, msg: str) -> None:
+        with _state_lock:
+            STATE["done"] += 1
+            STATE[status] += 1
+            n, t = STATE["done"], STATE["total"]
+        icon = {"ok": "✓", "skip": "-", "fail": "✗"}[status]
+        _push(f"[{n}/{t}] {icon} {name}  ({msg})")
+
     try:
-        for fmt in formats:
-            out = HERE / fmt
-            out.mkdir(parents=True, exist_ok=True)
-            manifest = dl.Manifest(out / dl.MANIFEST_NAME)
-            _push(f"=== {fmt.upper()} — {len(songs)}곡 → {out} ===")
+        _push(f"=== {len(songs)}곡 · {' + '.join(f.upper() for f in want)} ===")
+        if "mp3" in want and not dl.ffmpeg_exe():
+            _push("⚠ ffmpeg 이 없어 MP3 를 만들 수 없습니다.  pip install imageio-ffmpeg")
 
-            for song in songs:
-                dest = out / dl.safe_name(song["title"], song["index"], fmt)
+        for song in songs:
+            wav_path = _local_file(wav_man, wav_out, song, "wav")
+
+            # ---- WAV ----
+            if "wav" in want:
                 with _state_lock:
-                    STATE["current"] = f"{fmt.upper()}  {dest.name}"
-
-                if manifest.has(song["id"], out) or (dest.is_file() and dest.stat().st_size > 0):
-                    manifest.add(song["id"], song["title"], dest)
-                    status, msg = "skip", "이미 있음"
+                    STATE["current"] = f"WAV  {song['title'][:40]}"
+                if wav_path:
+                    wav_man.add(song["id"], song["title"], wav_path)
+                    tick("skip", wav_path.name, "이미 있음")
                 else:
-                    size = dl.remote_size(song[f"{fmt}_url"])
-                    if size is None and fmt == "wav" and maker:
-                        # 서버에 WAV 가 없다 — 지금 만들어 달라고 요청한다
-                        _push(f"    WAV 생성 요청 — {song['title'][:46]}")
-                        size = maker.make(song)
-                    if size is None:
-                        status, msg = "fail", f"{fmt.upper()} 없음 (서버 미생성)"
+                    dest = wav_out / dl.safe_name(song["title"], song["index"], "wav")
+                    status, msg = _fetch_wav(song, dest, maker)
+                    if status in ("ok", "skip"):
+                        wav_man.add(song["id"], song["title"], dest)
+                        wav_path = dest
+                    tick(status, dest.name, msg)
+
+            # ---- MP3 (WAV 에서 변환) ----
+            if "mp3" in want:
+                have = _local_file(mp3_man, mp3_out, song, "mp3")
+                dest = mp3_out / dl.safe_name(song["title"], song["index"], "mp3")
+                if have:
+                    mp3_man.add(song["id"], song["title"], have)
+                    tick("skip", have.name, "이미 있음")
+                else:
+                    if wav_path is None:
+                        # 변환하려면 원본이 필요하다. WAV 를 요청하지 않았어도 받는다.
+                        src = wav_out / dl.safe_name(song["title"], song["index"], "wav")
+                        with _state_lock:
+                            STATE["current"] = f"WAV(변환용)  {song['title'][:34]}"
+                        st, _ = _fetch_wav(song, src, maker)
+                        if st in ("ok", "skip"):
+                            wav_man.add(song["id"], song["title"], src)
+                            wav_path = src
+                    if wav_path is None:
+                        tick("fail", dest.name, "원본 WAV 가 없어 변환할 수 없습니다")
                     else:
-                        status, msg = dl.download(song[f"{fmt}_url"], dest, size)
-                        if status in ("ok", "skip"):
-                            manifest.add(song["id"], song["title"], dest)
+                        with _state_lock:
+                            STATE["current"] = f"MP3 변환  {song['title'][:34]}"
+                        status, msg = dl.to_mp3(wav_path, dest)
+                        if status == "ok":
+                            mp3_man.add(song["id"], song["title"], dest)
+                        tick(status, dest.name, msg)
 
-                with _state_lock:
-                    STATE["done"] += 1
-                    STATE[status] += 1
-                    n, t = STATE["done"], STATE["total"]
-                icon = {"ok": "✓", "skip": "-", "fail": "✗"}[status]
-                _push(f"[{n}/{t}] {icon} {dest.name}  ({msg})")
+            if STATE["done"] % 20 == 0:
+                wav_man.save()
+                if mp3_man:
+                    mp3_man.save()
 
-                if STATE["done"] % 20 == 0:
-                    manifest.save()
-            manifest.save()
-
+        wav_man.save()
+        if mp3_man:
+            mp3_man.save()
         _push(f"\n완료 — 받음 {STATE['ok']}, 건너뜀 {STATE['skip']}, 실패 {STATE['fail']}")
     except Exception as e:  # noqa: BLE001
         _push(f"오류로 중단됐습니다: {e}")
@@ -771,12 +927,27 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"unknown id", "text/plain")
             return
 
-        path = HERE / "mp3" / dl.safe_name(song["title"], song["index"], "mp3")
-        if not (path.is_file() and path.stat().st_size > 0):
-            self.send_response(302)  # 아직 안 받은 곡은 스트리밍으로
-            self.send_header("Location", song["mp3_url"])
-            self.end_headers()
+        # 받아둔 파일로 재생한다. MP3 가 없으면 WAV 로 대신한다 —
+        # Suno 의 스트리밍 주소(cdn1 mp3)는 막혔고 m4a 는 암호화돼 있어 못 쓴다.
+        path = None
+        for folder, ext in (("mp3", "mp3"), ("wav", "wav")):
+            out = HERE / folder
+            rec = dl.Manifest(out / dl.MANIFEST_NAME).entries.get(clip_id)
+            cands = [out / rec["file"]] if rec else []
+            cands.append(out / dl.safe_name(song["title"], song["index"], ext))
+            for c in cands:
+                if c.is_file() and c.stat().st_size > 0:
+                    path = c
+                    break
+            if path:
+                break
+
+        if path is None:
+            self._send(404, "재생할 파일이 없습니다. 먼저 내려받으세요.".encode("utf-8"),
+                       "text/plain; charset=utf-8")
             return
+
+        ctype = "audio/wav" if path.suffix.lower() == ".wav" else "audio/mpeg"
 
         # 탐색(seek)이 되려면 Range 요청을 처리해야 한다
         size = path.stat().st_size
@@ -796,7 +967,7 @@ class Handler(BaseHTTPRequestHandler):
 
         length = end - start + 1
         self.send_response(status)
-        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
         if status == 206:
@@ -889,76 +1060,9 @@ def cmd_ui(port: int = 8777, open_browser: bool = True) -> int:
 
 # --------------------------------------------------------------------------- #
 # WAV 생성 요청
-# --------------------------------------------------------------------------- #
-# Suno 는 곡을 만들 때 WAV 를 미리 만들어 두지 않는다. 누군가 한 번 다운로드를
-# 눌러야 그때 변환된다. 아래 엔드포인트가 그 "한 번 누르기"에 해당한다.
-CONVERT_JS = r"""
-async (ids) => {
-  const API = 'https://studio-api.prod.suno.com';
-  const out = [];
-  for (const id of ids) {
-    try {
-      const token = await window.Clerk.session.getToken();
-      const r = await fetch(API + '/api/gen/' + id + '/convert_wav/', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: '{}',
-      });
-      out.push({ id, status: r.status });
-    } catch (e) {
-      out.push({ id, status: 'EX' });
-    }
-    await new Promise(r => setTimeout(r, 600));
-  }
-  return out;
-}
-"""
-
-
-def convert_wavs(need: list[dict], channel: str | None = None,
-                 log=print) -> int:
-    """WAV 변환을 요청한다. 성공 요청 수를 돌려준다."""
-    channel = _channel(channel)
-    pw, ctx, page = _browser(headless=False, channel=channel)
-    ok = 0
-    try:
-        if not _goto_suno(page) or not _is_logged_in(page):
-            log(f"{BROWSERS[channel]} 에서 로그인이 필요합니다.")
-            return 0
-        for r in page.evaluate(CONVERT_JS, [s["id"] for s in need]):
-            good = r["status"] in (200, 201, 202, 204)
-            ok += good
-            title = next(s["title"] for s in need if s["id"] == r["id"])
-            log(f"  {'OK' if good else '실패(%s)' % r['status']:10} {title[:46]}")
-    finally:
-        _shutdown(pw, ctx)
-    return ok
-
-
-def wait_for_wavs(need: list[dict], log=print, rounds: int = 20) -> list[dict]:
-    """생성될 때까지 기다린다. 준비된 곡 목록을 돌려준다."""
-    ready, pending = [], list(need)
-    for _ in range(rounds):
-        time.sleep(6)
-        still = []
-        for s in pending:
-            if dl.remote_size(s["wav_url"]) is not None:
-                ready.append(s)
-                log(f"  준비됨 — {s['title'][:46]}")
-            else:
-                still.append(s)
-        pending = still
-        if not pending:
-            break
-    for s in pending:
-        log(f"  아직 생성 안 됨 — {s['title'][:46]}")
-    return ready
-
-
 def cmd_makewav(dry_run: bool = False, channel: str | None = None,
                 download: bool = True) -> int:
-    """서버에 WAV 가 없는 곡의 변환을 요청하고, 생성되면 받아 둔다."""
+    """WAV 가 없는 곡을 찾아 변환을 요청하고 받아 둔다."""
     songs = _load_library().get("songs", [])
     if not songs:
         print("목록이 없습니다.  sync  를 먼저 실행하세요.")
@@ -967,47 +1071,29 @@ def cmd_makewav(dry_run: bool = False, channel: str | None = None,
     out = HERE / "wav"
     out.mkdir(parents=True, exist_ok=True)
     manifest = dl.Manifest(out / dl.MANIFEST_NAME)
-    titled = [s for s in songs if s["title"].strip().lower() != "untitled"]
-    local_missing = [
-        s for s in titled
-        if not manifest.has(s["id"], out)
+    need = [
+        s for s in songs
+        if s["title"].strip().lower() != "untitled"
+        and not manifest.has(s["id"], out)
         and not (out / dl.safe_name(s["title"], s["index"], "wav")).is_file()
     ]
-    if not local_missing:
+    if not need:
         print("모든 곡의 WAV 를 이미 갖고 있습니다.")
         return 0
 
-    print(f"로컬에 WAV 가 없는 곡 {len(local_missing)}곡 — 서버 상태 확인 중...")
-    need, ready = [], []
-    for s in local_missing:
-        (ready if dl.remote_size(s["wav_url"]) is not None else need).append(s)
-        time.sleep(0.5)  # 몰아서 요청하면 차단당해 오탐이 난다
-
-    if ready:
-        print(f"  이미 서버에 있음 (바로 받을 수 있음): {len(ready)}곡")
-    if not need:
-        print("변환이 필요한 곡은 없습니다.")
-    else:
-        print(f"  변환이 필요함: {len(need)}곡")
-        for s in need:
-            print(f"     #{s['index']:<4} {s['title'][:46]}")
-
+    print(f"WAV 가 없는 곡 {len(need)}곡")
+    for s in need:
+        print(f"   #{s['index']:<4} {s['title'][:46]}")
     if dry_run:
         print("\n--dry-run 이라 여기서 멈춥니다.")
         return 0
+    if not download:
+        return 0
 
-    if need:
-        print("\n※ 변환 요청은 Suno 에서 다운로드 버튼을 누르는 것과 같은 동작입니다.")
-        print("   2026-09-03 부터는 월 다운로드 한도에 포함될 수 있습니다.\n")
-        print(f"{len(need)}곡 변환 요청 중...")
-        convert_wavs(need, channel)
-        print("생성될 때까지 기다리는 중...")
-        ready += wait_for_wavs(need)
-
-    if ready and download:
-        print(f"\nWAV {len(ready)}곡 내려받는 중...")
-        run_download(ready, ["wav"])
-    return 0
+    print("\n※ 변환 요청은 Suno 에서 다운로드 버튼을 누르는 것과 같은 동작입니다.")
+    print("   2026-09-03 부터는 월 다운로드 한도에 포함될 수 있습니다.\n")
+    run_download(need, ["wav"], make_wav=True)
+    return 0 if STATE["fail"] == 0 else 2
 
 
 # --------------------------------------------------------------------------- #

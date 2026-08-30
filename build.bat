@@ -9,7 +9,7 @@ cd /d "%~dp0"
 
 echo [1/3] 빌드 중...
 python -m PyInstaller --noconfirm --onedir --name SunoDownloader ^
-    --add-data "ui.html;." --collect-all playwright suno.py
+    --add-data "ui.html;." --collect-all playwright --collect-all imageio_ffmpeg suno.py
 if errorlevel 1 goto :fail
 
 echo.
