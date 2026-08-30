@@ -107,8 +107,9 @@
     <strong id="count">0곡 선택</strong>
     <label class="chk"><input type="checkbox" id="fWav" checked> WAV</label>
     <label class="chk"><input type="checkbox" id="fMp3"> MP3</label>
-    <label class="chk" title="서버에 WAV가 아직 없으면 변환을 요청한 뒤 받습니다. Suno에서 다운로드 버튼을 누르는 것과 같은 동작이라, 2026-09-03 부터는 월 한도에 포함될 수 있습니다.">
-      <input type="checkbox" id="mkWav" checked> 없으면 WAV 생성</label>
+    <label class="chk" id="mkWavLabel"
+           title="서버에 WAV가 아직 없으면 변환을 요청한 뒤 받습니다. Suno에서 다운로드 버튼을 누르는 것과 같은 동작이라, 2026-09-03 부터는 월 한도에 포함될 수 있습니다.">
+      <input type="checkbox" id="mkWav"> 없으면 WAV 생성</label>
     <label class="chk"><input type="checkbox" id="hideUntitled" checked> untitled 숨기기</label>
     <button class="primary" id="go">다운로드 시작</button>
     <span id="status"></span>
@@ -151,6 +152,20 @@
 <script>
 let SONGS = [], HAVE = {wav:new Set(), mp3:new Set()}, SEL = new Set(), poll = null;
 const $ = (id) => document.getElementById(id);
+
+/* "없으면 WAV 생성" 은 Suno 에서 다운로드 버튼을 누르는 것과 같은 동작이라
+   2026-09-03 부터 월 한도에 포함될 수 있다. 그 전까지만 기본으로 켜 둔다. */
+(() => {
+  const CAP_START = new Date('2026-09-03T00:00:00');
+  const before = new Date() < CAP_START;
+  $('mkWav').checked = before;
+  if (!before) {
+    const tip = document.createElement('span');
+    tip.className = 'meta';
+    tip.textContent = '(한도에 포함될 수 있어 기본 꺼짐)';
+    $('mkWavLabel').appendChild(tip);
+  }
+})();
 
 // 테이블 헤더가 상단 바 바로 아래에 붙도록 실제 높이를 추적한다
 (() => {
