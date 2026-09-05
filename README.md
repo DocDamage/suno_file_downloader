@@ -60,7 +60,9 @@ cd suno_file_downloader
 그리고 **`run.bat` 을 더블클릭**하세요. 끝입니다.
 
 처음 한 번은 필요한 패키지를 자동으로 설치하고, 그 다음부터는 바로 실행됩니다.
-Python이 없으면 어디서 받는지 알려 줍니다.
+
+Python은 `python` 명령, `py` 런처, 표준 설치 경로 순으로 찾습니다.
+**PATH에 등록돼 있지 않아도 설치만 돼 있으면 찾아냅니다.**
 
 명령을 붙여서 쓸 수도 있습니다.
 
@@ -301,6 +303,22 @@ suno_file_downloader/
 <br>
 
 브라우저 자동화 도구가 항상 붙이는 플래그입니다. 무시하셔도 됩니다.
+</details>
+
+<details>
+<summary><b>"Python 을 찾지 못했습니다" 라고 나와요</b></summary>
+
+<br>
+
+정말 설치가 안 된 경우입니다. [python.org](https://www.python.org/downloads/)에서
+설치하고, 설치 화면의 **"Add python.exe to PATH"** 를 반드시 체크하세요.
+
+설치했는데도 같은 메시지가 나오면 Microsoft Store 연결용 가짜 `python.exe` 가
+가로채는 경우입니다. **설정 > 앱 > 고급 앱 설정 > 앱 실행 별칭** 에서
+`python.exe` 를 끄세요. 배치 파일이 이 상황을 감지하면 알려줍니다.
+
+회사 PC라 Python을 설치할 수 없다면, 집에서 `build.bat` 으로 만든
+`SunoDownloader.exe` 와 `_internal\` 폴더를 복사해 오시면 Python 없이 돌아갑니다.
 </details>
 
 <details>

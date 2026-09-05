@@ -74,7 +74,23 @@ flowchart TB
 
 <br>
 
-## 4. 파일이 놓이는 곳 — 호스트 세 군데
+## 3-1. Python 을 못 찾을 때
+
+`run.bat` 은 세 곳을 순서대로 본다. PATH 에 없어도 설치만 돼 있으면 찾는다.
+
+1. `python` — PATH 에 등록된 것
+2. `py -3` — 런처. python 이 PATH 에 없어도 대개 이건 있다
+3. `%LOCALAPPDATA%\Programs\Python\Python3*`, `%ProgramFiles%\Python3*`,
+   `%ProgramFiles(x86)%\Python3*` 안의 `python.exe`
+
+셋 다 없으면 설치 안내를 띄운다. 이때 `%LOCALAPPDATA%\Microsoft\WindowsAppspython.exe` 가 있으면 **Microsoft Store 연결용 가짜 실행 파일**이 가로채는
+상황이므로 앱 실행 별칭을 끄라고 따로 알려준다. 이 파일은 실행하면 스토어를
+열 뿐이라 `--version` 이 실패한다.
+
+Python 을 설치할 수 없는 PC 라면 `build.bat` 으로 만든 `SunoDownloader.exe` 와
+`_internal/` 을 복사해 가면 된다. Python 없이 돈다.
+
+ — 호스트 세 군데
 
 전부 Suno 것이지만 열려 있는 정도가 다릅니다.
 
