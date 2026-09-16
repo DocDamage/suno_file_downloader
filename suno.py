@@ -522,8 +522,17 @@ def cmd_sync(headless: bool = False, channel: str | None = None) -> int:
 
     # 번호는 만든 날짜 순서로 매긴다 — 가장 오래된 곡이 1번.
     # 순위로 정의하면 어느 PC 에서 계산해도 같은 번호가 나온다.
+    #
+    # created_at 이 밀리초까지 같은 곡들이 있다. 한 번의 생성 요청에서 나온
+    # 클립들이라 그렇다(현재 41쌍). 이때 id(UUID)로 순서를 가르면 무작위라서
+    # 피드 순서와 어긋나고, 최신순 화면에서 번호가 802 -> 800 -> 801 처럼
+    # 거꾸로 가는 구간이 생긴다. 피드는 최신순으로 내려오므로, 동점일 때는
+    # 피드에 실린 순서를 뒤집어 번호를 준다. 그래야 번호가 항상 내려간다.
+    feed_pos = {x["id"]: i for i, x in enumerate(songs)}
     for rank, s2 in enumerate(
-            sorted(songs, key=lambda x: (x.get("created_at") or "", x["id"])), start=1):
+            sorted(songs,
+                   key=lambda x: (x.get("created_at") or "", -feed_pos[x["id"]])),
+            start=1):
         s2["index"] = rank
 
     payload = {
