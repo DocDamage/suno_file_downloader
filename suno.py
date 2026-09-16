@@ -332,7 +332,7 @@ def _browser(headless: bool, channel: str = "chrome"):
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        sys.exit("playwright 가 없습니다.  pip install playwright  로 설치하세요.")
+        sys.exit("Playwright is not installed. Run: pip install playwright")
 
     pw = sync_playwright().start()
 
@@ -357,7 +357,7 @@ def _browser(headless: bool, channel: str = "chrome"):
         return pw, ctx, page
 
     pw.stop()
-    sys.exit(f"{BROWSERS[channel]} 를 띄우지 못했습니다: {first_error}")
+    sys.exit(f"Could not start {BROWSERS[channel]}: {first_error}")
 
 
 def _shutdown(pw, ctx) -> None:
@@ -405,14 +405,14 @@ def _goto_suno(page, attempts: int = 5) -> bool:
     """
     last = None
     for i in range(1, attempts + 1):
-        print(f"  suno.com 접속 중... ({i}/{attempts})")
+        print(f"  Connecting to suno.com... ({i}/{attempts})")
         try:
             page.goto(SUNO_URL, wait_until="commit", timeout=20_000)
             return True
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(2)
-    print(f"suno.com 에 접속하지 못했습니다: {last}")
+    print(f"Could not connect to suno.com: {last}")
     return False
 
 
@@ -480,15 +480,15 @@ def cmd_login(channel: str | None = None) -> int:
         if not _goto_suno(page):
             return 1
         if _is_logged_in(page):
-            print("이미 로그인돼 있습니다.")
+            print("Already logged in.")
             _remember_browser(channel)
             return 0
 
-        print("\n브라우저 창에서 Suno 에 로그인해 주세요.")
-        print("로그인이 끝나면 이 창이 자동으로 감지합니다. (최대 5분 대기)\n")
+        print("\nPlease log in to Suno in the browser window.")
+        print("The login will be detected automatically (waiting up to 5 minutes).\n")
         for _ in range(150):  # 5분
             if _is_logged_in(page):
-                print("로그인 확인됐습니다. 세션이 저장되어 다음부터는 자동입니다.")
+                print("Login confirmed. Your session is saved for future runs.")
                 _remember_browser(channel)
                 time.sleep(1.5)  # 쿠키 flush 여유
                 return 0

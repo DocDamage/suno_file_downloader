@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Suno 다운로더</title>
+<title>Suno Downloader</title>
 <style>
   :root{
     --bg:#f7f7f9; --panel:#fff; --line:#e3e3e8; --text:#1a1a1f; --dim:#6a6a76;
@@ -90,28 +90,28 @@
 </head>
 <body>
 <header>
-  <h1>Suno 다운로더 <span class="meta" id="meta"></span></h1>
+  <h1>Suno Downloader <span class="meta" id="meta"></span></h1>
   <div class="row">
-    <input type="search" id="q" placeholder="제목 검색...">
-    <select id="sort" title="목록 정렬 기준">
-      <option value="newest">최신순 (Suno와 동일)</option>
-      <option value="oldest">오래된순</option>
-      <option value="index">파일번호순</option>
-      <option value="title">제목순</option>
+    <input type="search" id="q" placeholder="Search titles...">
+    <select id="sort" title="List sort order">
+      <option value="newest">Newest (same as Suno)</option>
+      <option value="oldest">Oldest</option>
+      <option value="index">File number</option>
+      <option value="title">Title</option>
     </select>
-    <button id="selAll">검색결과 전체선택</button>
-    <button id="selNone">선택해제</button>
-    <button id="selNew">아직 안 받은 것만</button>
+    <button id="selAll">Select all results</button>
+    <button id="selNone">Clear selection</button>
+    <button id="selNew">Select not downloaded</button>
   </div>
   <div class="bar">
-    <strong id="count">0곡 선택</strong>
+    <strong id="count">0 selected</strong>
     <label class="chk"><input type="checkbox" id="fWav" checked> WAV</label>
     <label class="chk"><input type="checkbox" id="fMp3"> MP3</label>
     <label class="chk" id="mkWavLabel"
-           title="서버에 WAV가 아직 없으면 변환을 요청한 뒤 받습니다. Suno에서 다운로드 버튼을 누르는 것과 같은 동작이라, 2026-09-03 부터는 월 한도에 포함될 수 있습니다.">
-      <input type="checkbox" id="mkWav"> 없으면 WAV 생성</label>
-    <label class="chk"><input type="checkbox" id="hideUntitled" checked> untitled 숨기기</label>
-    <button class="primary" id="go">다운로드 시작</button>
+           title="If a WAV is not on the server, request conversion before downloading. This is equivalent to clicking Download on Suno and may count toward the monthly limit.">
+      <input type="checkbox" id="mkWav"> Generate WAV if missing</label>
+    <label class="chk"><input type="checkbox" id="hideUntitled" checked> Hide untitled</label>
+    <button class="primary" id="go">Start download</button>
     <span id="status"></span>
   </div>
   <div class="bar" id="progress" style="display:none">
@@ -124,18 +124,18 @@
   <table>
     <thead><tr>
       <th style="width:34px"><input type="checkbox" id="master"></th>
-      <th style="width:38px" title="미리듣기"></th>
+      <th style="width:38px" title="Preview"></th>
       <th style="width:64px"></th>
       <th class="num" style="width:66px"
-          title="파일 이름 앞에 붙는 번호입니다. 곡마다 고정되며 목록 순서와는 무관합니다.">파일 #</th>
-      <th>제목</th><th style="width:110px">모델</th>
-      <th style="width:70px">길이</th>
-      <th style="width:66px" title="내 PC에 이미 받아둔 파일이 있는지 여부입니다.">WAV</th>
-      <th style="width:66px" title="내 PC에 이미 받아둔 파일이 있는지 여부입니다.">MP3</th>
+          title="The filename number is fixed per song and independent of list order.">File #</th>
+      <th>Title</th><th style="width:110px">Model</th>
+      <th style="width:70px">Length</th>
+      <th style="width:66px" title="Whether the file already exists on your PC.">WAV</th>
+      <th style="width:66px" title="Whether the file already exists on your PC.">MP3</th>
     </tr></thead>
     <tbody id="tbody"></tbody>
   </table>
-  <div class="empty" id="empty" style="display:none">검색 결과가 없습니다.</div>
+  <div class="empty" id="empty" style="display:none">No matching songs.</div>
   <div id="logwrap"><pre id="log"></pre></div>
 </main>
 
@@ -146,7 +146,7 @@
   <span id="bSrc"></span>
   <input type="range" id="seek" min="0" max="1000" value="0" step="1">
   <span id="bTime">0:00 / 0:00</span>
-  <button id="bClose" title="닫기">✕</button>
+  <button id="bClose" title="Close">✕</button>
 </div>
 
 <script>
@@ -162,7 +162,7 @@ const $ = (id) => document.getElementById(id);
   if (!before) {
     const tip = document.createElement('span');
     tip.className = 'meta';
-    tip.textContent = '(한도에 포함될 수 있어 기본 꺼짐)';
+    tip.textContent = '(off by default because it may count toward the limit)';
     $('mkWavLabel').appendChild(tip);
   }
 })();
@@ -187,8 +187,8 @@ async function load(){
   HAVE.wav = new Set(d.downloaded.wav || []);
   HAVE.mp3 = new Set(d.downloaded.mp3 || []);
   $('meta').textContent =
-    `Liked ${SONGS.length}곡 · 받아둔 것 WAV ${HAVE.wav.size} / MP3 ${HAVE.mp3.size}` +
-    (d.synced_at ? ` · 동기화 ${d.synced_at.replace('T',' ')}` : '');
+    `Liked ${SONGS.length} songs · Available WAV ${HAVE.wav.size} / MP3 ${HAVE.mp3.size}` +
+    (d.synced_at ? ` · Synced ${d.synced_at.replace('T',' ')}` : '');
   render();
 }
 
@@ -217,7 +217,7 @@ function render(){
     <tr class="${SEL.has(s.id)?'sel':''}${NOW === s.id ? ' playing':''}" data-id="${s.id}">
       <td><input type="checkbox" ${SEL.has(s.id)?'checked':''}></td>
       <td><button class="play" data-play="${s.id}"
-            title="미리듣기">${NOW === s.id && !audio.paused ? '⏸' : '▶'}</button></td>
+            title="Preview">${NOW === s.id && !audio.paused ? '⏸' : '▶'}</button></td>
       <td class="art"><img loading="lazy" decoding="async" width="54" height="54"
             src="${artUrl(s)}" alt="" onerror="this.style.visibility='hidden'"></td>
       <td class="num">${s.index}</td>
@@ -225,10 +225,10 @@ function render(){
         ${s.tags ? `<span class="sub" title="${esc(s.tags)}">${esc(s.tags)}</span>` : ''}</td>
       <td><span class="tag">${esc(s.model||'')}</span></td>
       <td class="num">${fmtDur(s.duration)}</td>
-      <td class="${HAVE.wav.has(s.id)?'have':'none'}">${HAVE.wav.has(s.id)?'받음':'미보유'}</td>
-      <td class="${HAVE.mp3.has(s.id)?'have':'none'}">${HAVE.mp3.has(s.id)?'받음':'미보유'}</td>
+      <td class="${HAVE.wav.has(s.id)?'have':'none'}">${HAVE.wav.has(s.id)?'Available':'Missing'}</td>
+      <td class="${HAVE.mp3.has(s.id)?'have':'none'}">${HAVE.mp3.has(s.id)?'Available':'Missing'}</td>
     </tr>`).join('');
-  $('count').textContent = SEL.size + '곡 선택';
+  $('count').textContent = SEL.size + ' selected';
   $('master').checked = rows.length > 0 && rows.every(s => SEL.has(s.id));
 }
 const esc = (t) => t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -253,11 +253,11 @@ function play(id){
   setStatus('');
   audio.play().catch(err => {
     // 곡을 빠르게 바꾸면 이전 play() 가 취소되는데, 이건 오류가 아니다
-    if (err.name !== 'AbortError') setStatus('재생할 수 없습니다: ' + err.message);
+  if (err.name !== 'AbortError') setStatus('Cannot play: ' + err.message);
   });
   $('bTitle').textContent = s ? s.title : '';
   $('bArt').src = s ? artUrl(s) : '';
-  $('bSrc').textContent = HAVE.mp3.has(id) ? 'MP3' : (HAVE.wav.has(id) ? 'WAV' : '없음');
+  $('bSrc').textContent = HAVE.mp3.has(id) ? 'MP3' : (HAVE.wav.has(id) ? 'WAV' : 'None');
   $('bar').classList.add('on');
   render();
 }
@@ -279,7 +279,7 @@ audio.addEventListener('play',  () => { $('bPlay').textContent = '⏸'; setStatu
 audio.addEventListener('pause', () => { $('bPlay').textContent = '▶'; render(); });
 audio.addEventListener('ended', stopPlay);
 audio.addEventListener('error', () => {
-  if (audio.getAttribute('src') && audio.error) setStatus('이 곡은 재생할 수 없습니다.');
+  if (audio.getAttribute('src') && audio.error) setStatus('This song cannot be played.');
 });
 
 let seeking = false;
@@ -328,11 +328,11 @@ $('go').onclick = async () => {
   const formats = [];
   if ($('fWav').checked) formats.push('wav');
   if ($('fMp3').checked) formats.push('mp3');
-  if (!SEL.size)   return setStatus('곡을 선택하세요.');
-  if (!formats.length) return setStatus('포맷을 선택하세요.');
+  if (!SEL.size)   return setStatus('Select at least one song.');
+  if (!formats.length) return setStatus('Select a format.');
 
   $('go').disabled = true;
-  setStatus('시작하는 중...');
+  setStatus('Starting...');
   const r = await fetch('/api/download', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ids: [...SEL], formats, makewav: $('mkWav').checked}),
@@ -351,7 +351,7 @@ async function tick(){
   const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
   $('pfill').style.width = pct + '%';
   $('ptext').textContent =
-    `${d.done}/${d.total} (${pct}%) · 받음 ${d.ok} · 건너뜀 ${d.skip} · 실패 ${d.fail}` +
+    `${d.done}/${d.total} (${pct}%) · Downloaded ${d.ok} · Skipped ${d.skip} · Failed ${d.fail}` +
     (d.current ? `  —  ${d.current}` : '');
   const log = $('log');
   const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
