@@ -1289,12 +1289,46 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
 
+def _ui_running(port: int) -> bool:
+    """그 포트에 이미 이 프로그램의 UI 서버가 떠 있는지 확인한다.
+
+    /api/progress 는 이 프로그램에만 있는 주소라, 다른 프로그램이 같은 포트를
+    쓰고 있는 경우와 구분된다.
+    """
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/progress", timeout=2
+        ) as r:
+            if r.status != 200:
+                return False
+            return "running" in json.loads(r.read() or b"{}")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def cmd_ui(port: int = 8777, open_browser: bool = True) -> int:
     if not _load_library().get("songs"):
         print("목록이 없습니다.  python suno.py sync  를 먼저 실행하세요.")
         return 1
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
+
+    # 이미 떠 있는지 bind 하기 "전에" 물어본다.
+    # Windows 는 HTTPServer 의 allow_reuse_address(SO_REUSEADDR) 때문에 이미
+    # 쓰이는 포트에도 bind 가 그냥 성공한다. 그래서 bind 실패로는 알 수 없고,
+    # 그대로 두면 서버가 두 개 떠서 요청이 어디로 갈지 알 수 없게 된다.
+    # 바탕화면 바로가기를 여러 번 눌러도 UI 가 열리게 하려는 것이기도 하다.
+    if _ui_running(port):
+        print(f"이미 실행 중입니다 — {url}")
+        if open_browser:
+            webbrowser.open(url)
+        return 0
+
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:  # noqa: BLE001
+        print(f"{port} 포트를 열지 못했습니다: {e}")
+        print("  --port 로 다른 번호를 지정하세요.  예:  run.bat ui --port 8778")
+        return 1
     print(f"\n웹 UI: {url}")
     print("종료하려면 이 창에서 Ctrl+C 를 누르세요.\n")
     if open_browser:
